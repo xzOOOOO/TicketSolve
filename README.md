@@ -151,7 +151,7 @@ SystemState
 #### 1. 克隆项目
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/xzOOOOO/TicketSolve.git
 cd TicketSolve
 ```
 
@@ -186,8 +186,8 @@ cp .env.example .env
 ```env
 # LLM 配置（支持 OpenAI 兼容接口）
 LLM_API_KEY=your-api-key-here
-LLM_MODEL=qwen3.5-flash
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_MODEL=your-model-here
+LLM_BASE_URL=your-url-here
 
 # LLM 限流配置
 LLM_MAX_CONCURRENT=5  # 最大并发数
@@ -614,8 +614,7 @@ app = workflow.compile(checkpointer=checkpointer)
 
 ## 联系方式
 
-- 项目 Issues：[GitHub Issues](your-repo-url/issues)
-- 邮箱：<your-email@example.com>
+- 项目 Issues：[GitHub Issues](https://github.com/xzOOOOO/TicketSolve.git)
 
 ***
 
