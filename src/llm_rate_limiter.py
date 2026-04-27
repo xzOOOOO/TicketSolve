@@ -50,9 +50,10 @@ class LLMRateLimiter:
             self.request_timestamps = [
                 ts for ts in self.request_timestamps 
                 if ts > now - 60
-            ]
+            ] # 过滤掉过期的请求时间戳
             
             if len(self.request_timestamps) >= self.rpm_limit:
+                # 如果超过RPM限制，计算需要等待的时间
                 wait_time = 60 - (now - self.request_timestamps[0])
                 if wait_time > 0:
                     logger.warning(
@@ -60,7 +61,7 @@ class LLMRateLimiter:
                         f"(当前窗口内请求数: {len(self.request_timestamps)})"
                     )
                     await asyncio.sleep(wait_time)
-            
+            # 没有超过并发请求和RPM限制，记录当前时间戳
             self.request_timestamps.append(time.time())
         
         logger.debug(f"[{node_name}] 获取LLM请求许可成功")
@@ -81,7 +82,7 @@ class LLMRateLimiter:
         active_requests = len([
             ts for ts in self.request_timestamps 
             if ts > now - 60
-        ])
+        ]) # 请求窗口内的请求数
         
         return {
             "max_concurrent": self.max_concurrent,
