@@ -6,6 +6,12 @@ MCP集成说明:
 - 工作流创建时一次性初始化 MCP 连接，获取所有工具
 - 按类别分组传递给各 Agent 节点，节点内部不再管理连接
 
+Multi-Agent 改造说明:
+- 原 nodes.py 函数式节点已重构为 agents/ 目录下的 Agent 类
+- 每个 Agent 拥有独立身份（name, role），通过 run() 方法执行
+- 返回格式与原节点完全一致，确保兼容
+- human_approval / executor / other_handler 暂保留函数式实现
+
 技术栈:
 - LangGraph: 状态图编排
 - langchain-mcp-adapters: MCP工具自动适配LangChain
@@ -18,12 +24,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from state import SystemState, DiagnosisType, ApprovalStatus
+from agents import RouterAgent, DBAgent, NetAgent, AppAgent, FixAgent
 from nodes import (
-    create_router_node,
-    create_db_agent_node,
-    create_net_agent_node,
-    create_app_agent_node,
-    create_fix_agent_node,
     create_human_approval_node,
     create_executor_node,
     create_other_handler_node
@@ -95,12 +97,12 @@ async def create_async_workflow(llm, checkpointer=None):
     db_tools, net_tools, app_tools = _classify_tools(all_tools)
     logger.info(f"工具分组 - DB: {len(db_tools)}, Net: {len(net_tools)}, App: {len(app_tools)}")
 
-    # 创建节点（注入对应工具）
-    router_node = create_router_node(llm)
-    db_agent_node = create_db_agent_node(llm, db_tools)
-    net_agent_node = create_net_agent_node(llm, net_tools)
-    app_agent_node = create_app_agent_node(llm, app_tools)
-    fix_agent_node = create_fix_agent_node(llm)
+    # 创建 Agent 实例（注入对应工具）
+    router_agent = RouterAgent(llm)
+    db_agent = DBAgent(llm, db_tools)
+    net_agent = NetAgent(llm, net_tools)
+    app_agent = AppAgent(llm, app_tools)
+    fix_agent = FixAgent(llm)
     human_approval_node = create_human_approval_node()
     executor_node = create_executor_node()
     other_handler_node = create_other_handler_node()
@@ -108,11 +110,11 @@ async def create_async_workflow(llm, checkpointer=None):
     # 构建状态图
     workflow = StateGraph(SystemState)
 
-    workflow.add_node("router", router_node)
-    workflow.add_node("db_agent", db_agent_node)
-    workflow.add_node("net_agent", net_agent_node)
-    workflow.add_node("app_agent", app_agent_node)
-    workflow.add_node("fix_agent", fix_agent_node)
+    workflow.add_node("router", router_agent.run)
+    workflow.add_node("db_agent", db_agent.run)
+    workflow.add_node("net_agent", net_agent.run)
+    workflow.add_node("app_agent", app_agent.run)
+    workflow.add_node("fix_agent", fix_agent.run)
     workflow.add_node("human_approval", human_approval_node)
     workflow.add_node("execute", executor_node)
     workflow.add_node("other_handler", other_handler_node)
