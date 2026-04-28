@@ -42,8 +42,8 @@ async def lifespan(app: FastAPI):
     logger.info("LLM实例创建完成（已集成限流+重试）")
     
     checkpointer = MemorySaver()
-    workflow_app = create_async_workflow(retry_llm, checkpointer=checkpointer)
-    logger.info("异步工作流创建完成")
+    workflow_app = await create_async_workflow(retry_llm, checkpointer=checkpointer)
+    logger.info("异步工作流创建完成（MCP工具已加载）")
     
     app_state["llm"] = retry_llm
     app_state["workflow"] = workflow_app

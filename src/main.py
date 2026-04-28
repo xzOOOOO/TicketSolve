@@ -22,14 +22,14 @@ async def main():
         logger.info("LLM实例创建完成")
         
         logger.info("创建工作流...")
-        app = create_async_workflow(llm)
-        logger.info("工作流创建完成")
+        app = await create_async_workflow(llm)
+        logger.info("工作流创建完成（MCP工具已加载）")
         
         config = {"configurable": {"thread_id": "test-thread-001"}}
         
         initial_state = {
-            "ticket_id": "TKT-004",
-            "symptom": "数据读不出来"
+            "ticket_id": "TKT-008",
+            "symptom": "数据库连接失败"
         }
         
         logger.info("第一次调用工作流...")

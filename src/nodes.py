@@ -1,9 +1,20 @@
 """
 所有节点定义 - 整合 router, agents, fix, approval, executor
+
+MCP集成说明:
+- 工具由 workflow.py 在创建时通过 langchain-mcp-adapters 一次性获取
+- Agent 节点通过参数接收工具列表，不管理 MCP 连接
+- 节点内部只做: 绑定工具 → LLM决策 → 执行工具调用 → 生成诊断
+
+技术栈:
+- LangGraph: 工作流编排
+- LangChain: LLM链式调用 + 工具绑定
+- MCP (Model Context Protocol): 工具调用协议
+- langchain-mcp-adapters: MCP工具自动适配
 """
+
 import json
 from state import SystemState, DiagnosisType, ApprovalStatus
-from langchain_core.tools import tool
 from prompts import (
     ROUTER_PROMPT, DB_PROMPT, DB_DIAGNOSIS_PROMPT,
     NET_PROMPT, NET_DIAGNOSIS_PROMPT,
@@ -14,6 +25,7 @@ from langgraph.types import interrupt
 from langgraph.errors import GraphInterrupt
 from database import AsyncSessionLocal, save_ticket
 from logger import logger
+
 
 def parse_json_content(content: str) -> dict:
     """解析JSON内容，支持多种格式"""
@@ -41,40 +53,20 @@ def parse_json_content(content: str) -> dict:
             logger.error(f"JSON解析失败,提取失败：{e}")
     return result
 
-@tool
-def check_db_connection() -> str:
-    """检查数据库连接状态"""
-    return json.dumps({"status": "timeout", "error": "Connection timed out after 30s", "possible_issue": "数据库连接池耗尽或网络阻塞"})
 
-@tool
-def check_db_slow_query() -> str:
-    """检查数据库慢查询"""
-    return json.dumps({"slow_queries": [{"sql": "SELECT * FROM orders WHERE status='pending'", "duration": "15s"}], "possible_issue": "存在多条慢查询，疑似缺少索引"})
+async def _execute_tool_calls(response, tools):
+    """执行LLM返回的工具调用，返回工具结果列表"""
+    tool_results = []
+    for tool_call in response.tool_calls:
+        logger.debug(f"调用MCP工具: {tool_call['name']}, args={tool_call['args']}")
+        for tool in tools:
+            if tool.name == tool_call["name"]:
+                result = await tool.ainvoke(tool_call["args"])
+                tool_results.append({"tool": tool_call["name"], "result": result})
+                logger.debug(f"MCP工具 {tool_call['name']} 返回成功")
+                break
+    return tool_results
 
-@tool
-def check_db_deadlock() -> str:
-    """检查数据库死锁"""
-    return json.dumps({"deadlocks": [], "possible_issue": "未检测到死锁"})
-
-@tool
-def check_network_ping(host: str) -> str:
-    """检查网络连通性"""
-    return json.dumps({"target": host, "status": "unreachable", "latency": None, "packet_loss": "100%", "possible_issue": "网络不通或目标主机不可达"})
-
-@tool
-def check_network_dns(domain: str) -> str:
-    """检查DNS解析"""
-    return json.dumps({"domain": domain, "resolved_ip": "10.0.0.1", "dns_status": "ok", "possible_issue": "DNS解析正常"})
-
-@tool
-def check_app_process(process_name: str) -> str:
-    """检查应用进程状态"""
-    return json.dumps({"process": process_name, "status": "running", "pid": 12345, "cpu": "85%", "memory": "92%", "possible_issue": "进程CPU和内存使用率过高"})
-
-@tool
-def check_app_port(port: int) -> str:
-    """检查应用端口状态"""
-    return json.dumps({"port": port, "status": "listening", "connection_count": 150, "possible_issue": "连接数正常"})
 
 def create_router_node(llm):
     chain = ROUTER_PROMPT | llm
@@ -105,39 +97,33 @@ def create_router_node(llm):
             }
     return router_node
 
-def create_db_agent_node(llm):
-    tools = [check_db_connection, check_db_slow_query, check_db_deadlock]
-    chain = DB_PROMPT | llm.bind_tools(tools)
 
+def create_db_agent_node(llm, tools):
+    """
+    数据库诊断Agent节点
+
+    Args:
+        llm: LLM实例
+        tools: MCP工具列表（由workflow注入，已过滤为db相关）
+    """
     async def db_agent_node(state: SystemState) -> dict:
-        """数据库诊断Agent节点"""
         try:
             logger.info(f"DB Agent开始诊断: symptom={state.symptom[:50]}...")
-            response = await chain.ainvoke({"symptom": state.symptom})  
-            
-            tool_results = []
-            for tool_call in response.tool_calls:
-                logger.debug(f"调用工具: {tool_call['name']}, args={tool_call['args']}")
-                for t in tools:
-                    if t.name == tool_call["name"]:
-                        result = await t.ainvoke(tool_call["args"])
-                        tool_results.append({"tool": tool_call["name"], "result": result})
-                        logger.debug(f"工具 {tool_call['name']} 返回成功")
-                        break
-            
-            diagnosis_response = DB_DIAGNOSIS_PROMPT | llm
-            diagnosis = await diagnosis_response.ainvoke({
-                "symptom": state.symptom, 
-                "tool_calls": str(response.tool_calls), 
+
+            response = await (DB_PROMPT | llm.bind_tools(tools)).ainvoke({"symptom": state.symptom})
+            tool_results = await _execute_tool_calls(response, tools)
+
+            diagnosis = await (DB_DIAGNOSIS_PROMPT | llm).ainvoke({
+                "symptom": state.symptom,
+                "tool_calls": str(response.tool_calls),
                 "tool_results": str(tool_results)
             })
             result = parse_json_content(diagnosis.content) or {"diagnosis": "无法解析", "possible_causes": []}
-            
+
             logger.info(f"DB Agent诊断完成: diagnosis={result.get('diagnosis')}")
-            
             return {
-                "db_agent_result": {**result, "tool_results": tool_results}, 
-                "messages": [f"DB Agent: {result.get('diagnosis')}"]
+                "db_agent_result": {**result, "tool_results": tool_results},
+                "messages": [f"DB Agent (MCP): {result.get('diagnosis')}"]
             }
         except Exception as e:
             logger.exception(f"DB Agent节点执行失败: {e}")
@@ -147,39 +133,33 @@ def create_db_agent_node(llm):
             }
     return db_agent_node
 
-def create_net_agent_node(llm):
-    tools = [check_network_ping, check_network_dns]
-    chain = NET_PROMPT | llm.bind_tools(tools)
 
+def create_net_agent_node(llm, tools):
+    """
+    网络诊断Agent节点
+
+    Args:
+        llm: LLM实例
+        tools: MCP工具列表（由workflow注入，已过滤为net相关）
+    """
     async def net_agent_node(state: SystemState) -> dict:
-        """网络诊断Agent节点"""
         try:
             logger.info(f"Net Agent开始诊断: symptom={state.symptom[:50]}...")
-            response = await chain.ainvoke({"symptom": state.symptom})  
-            
-            tool_results = []
-            for tool_call in response.tool_calls:
-                logger.debug(f"调用工具: {tool_call['name']}, args={tool_call['args']}")
-                for t in tools:
-                    if t.name == tool_call["name"]:
-                        result = await t.ainvoke(tool_call["args"])
-                        tool_results.append({"tool": tool_call["name"], "result": result})
-                        logger.debug(f"工具 {tool_call['name']} 返回成功")
-                        break
-            
-            diagnosis_response = NET_DIAGNOSIS_PROMPT | llm
-            diagnosis = await diagnosis_response.ainvoke({
-                "symptom": state.symptom, 
-                "tool_calls": str(response.tool_calls), 
+
+            response = await (NET_PROMPT | llm.bind_tools(tools)).ainvoke({"symptom": state.symptom})
+            tool_results = await _execute_tool_calls(response, tools)
+
+            diagnosis = await (NET_DIAGNOSIS_PROMPT | llm).ainvoke({
+                "symptom": state.symptom,
+                "tool_calls": str(response.tool_calls),
                 "tool_results": str(tool_results)
             })
             result = parse_json_content(diagnosis.content) or {"diagnosis": "无法解析", "possible_causes": []}
-            
+
             logger.info(f"Net Agent诊断完成: diagnosis={result.get('diagnosis')}")
-            
             return {
-                "net_agent_result": {**result, "tool_results": tool_results}, 
-                "messages": [f"Net Agent: {result.get('diagnosis')}"]
+                "net_agent_result": {**result, "tool_results": tool_results},
+                "messages": [f"Net Agent (MCP): {result.get('diagnosis')}"]
             }
         except Exception as e:
             logger.exception(f"Net Agent节点执行失败: {e}")
@@ -189,39 +169,33 @@ def create_net_agent_node(llm):
             }
     return net_agent_node
 
-def create_app_agent_node(llm):
-    tools = [check_app_process, check_app_port]
-    chain = APP_PROMPT | llm.bind_tools(tools)
 
+def create_app_agent_node(llm, tools):
+    """
+    应用诊断Agent节点
+
+    Args:
+        llm: LLM实例
+        tools: MCP工具列表（由workflow注入，已过滤为app相关）
+    """
     async def app_agent_node(state: SystemState) -> dict:
-        """应用诊断Agent节点"""
         try:
             logger.info(f"App Agent开始诊断: symptom={state.symptom[:50]}...")
-            response = await chain.ainvoke({"symptom": state.symptom})      
-            
-            tool_results = []
-            for tool_call in response.tool_calls:
-                logger.debug(f"调用工具: {tool_call['name']}, args={tool_call['args']}")
-                for t in tools:
-                    if t.name == tool_call["name"]:
-                        result = await t.ainvoke(tool_call["args"])
-                        tool_results.append({"tool": tool_call["name"], "result": result})
-                        logger.debug(f"工具 {tool_call['name']} 返回成功")
-                        break
-            
-            diagnosis_response = APP_DIAGNOSIS_PROMPT | llm
-            diagnosis = await diagnosis_response.ainvoke({
-                "symptom": state.symptom, 
-                "tool_calls": str(response.tool_calls), 
+
+            response = await (APP_PROMPT | llm.bind_tools(tools)).ainvoke({"symptom": state.symptom})
+            tool_results = await _execute_tool_calls(response, tools)
+
+            diagnosis = await (APP_DIAGNOSIS_PROMPT | llm).ainvoke({
+                "symptom": state.symptom,
+                "tool_calls": str(response.tool_calls),
                 "tool_results": str(tool_results)
             })
             result = parse_json_content(diagnosis.content) or {"diagnosis": "无法解析", "possible_causes": []}
-            
+
             logger.info(f"App Agent诊断完成: diagnosis={result.get('diagnosis')}")
-            
             return {
-                "app_agent_result": {**result, "tool_results": tool_results}, 
-                "messages": [f"App Agent: {result.get('diagnosis')}"]
+                "app_agent_result": {**result, "tool_results": tool_results},
+                "messages": [f"App Agent (MCP): {result.get('diagnosis')}"]
             }
         except Exception as e:
             logger.exception(f"App Agent节点执行失败: {e}")
@@ -231,10 +205,11 @@ def create_app_agent_node(llm):
             }
     return app_agent_node
 
+
 def create_fix_agent_node(llm):
     chain = FIX_PROMPT | llm
 
-    async def fix_agent_node(state: SystemState) -> dict: 
+    async def fix_agent_node(state: SystemState) -> dict:
         """修复方案生成Agent节点"""
         try:
             diagnosis_type = state.diagnosis_type
@@ -250,23 +225,23 @@ def create_fix_agent_node(llm):
             logger.info(f"Fix Agent开始生成修复方案: diagnosis_type={diagnosis_type}")
             
             response = await chain.ainvoke({
-                "diagnosis_type": diagnosis_type, 
+                "diagnosis_type": diagnosis_type,
                 "diagnosis_result": str(diagnosis_result)
             })
             result = parse_json_content(response.content) or {
-                "plan_id": "PLAN-ERROR", 
-                "description": "无法生成方案", 
-                "risk_level": "unknown", 
-                "prerequisites": [], 
-                "steps": [], 
-                "verification": {"commands": [], "expected_result": ""}, 
+                "plan_id": "PLAN-ERROR",
+                "description": "无法生成方案",
+                "risk_level": "unknown",
+                "prerequisites": [],
+                "steps": [],
+                "verification": {"commands": [], "expected_result": ""},
                 "estimated_time": "0"
             }
             
             logger.info(f"Fix Agent方案生成完成: plan_id={result.get('plan_id')}, risk_level={result.get('risk_level')}")
             
             return {
-                "fix_plan": result, 
+                "fix_plan": result,
                 "messages": [f"Fix Agent: 生成修复方案 {result.get('plan_id')} - 风险等级: {result.get('risk_level')}"]
             }
         except Exception as e:
@@ -285,31 +260,32 @@ def create_fix_agent_node(llm):
             }
     return fix_agent_node
 
+
 def create_human_approval_node():
-    async def human_approval_node(state: SystemState) -> dict:    
+    async def human_approval_node(state: SystemState) -> dict:
         """人工审批节点"""
         try:
             logger.info(f"审批节点: 请求审批工单 {state.ticket_id}")
             
             approval = interrupt({
-                "type": "approval_required", 
-                "ticket_id": state.ticket_id, 
-                "fix_plan": state.fix_plan, 
+                "type": "approval_required",
+                "ticket_id": state.ticket_id,
+                "fix_plan": state.fix_plan,
                 "message": f"请审批修复方案: {state.fix_plan.plan_id}"
             })
             
             if approval.get("approved", False):
                 logger.info(f"审批节点: 工单 {state.ticket_id} 已审批通过, 备注: {approval.get('comments', '')}")
                 return {
-                    "approval_status": ApprovalStatus.APPROVED, 
-                    "approver_comments": approval.get("comments", ""), 
+                    "approval_status": ApprovalStatus.APPROVED,
+                    "approver_comments": approval.get("comments", ""),
                     "messages": [f"人工审批: 已批准 - {approval.get('comments', '')}"]
                 }
             else:
                 logger.info(f"审批节点: 工单 {state.ticket_id} 已拒绝, 备注: {approval.get('comments', '')}")
                 return {
-                    "approval_status": ApprovalStatus.REJECTED, 
-                    "approver_comments": approval.get("comments", ""), 
+                    "approval_status": ApprovalStatus.REJECTED,
+                    "approver_comments": approval.get("comments", ""),
                     "messages": [f"人工审批: 已拒绝 - {approval.get('comments', '')}"]
                 }
         except GraphInterrupt:
@@ -322,6 +298,7 @@ def create_human_approval_node():
                 "messages": [f"人工审批: 异常 - {str(e)}"]
             }
     return human_approval_node
+
 
 def create_other_handler_node():
     async def other_handler_node(state: SystemState) -> dict:
@@ -354,9 +331,10 @@ def create_other_handler_node():
                     "messages": [f"Other Handler: 保存工单失败 - {str(e)}"]
                 }
             finally:
-                db.close()
+                await db.close()
                 logger.debug("Other Handler: 数据库会话已关闭")
     return other_handler_node
+
 
 def create_executor_node():
     async def executor_node(state: SystemState) -> dict:
@@ -372,21 +350,21 @@ def create_executor_node():
                 for step in steps:
                     logger.debug(f"执行步骤 {step.step_id}: {step.action}")
                     executed_steps.append({
-                        "step_id": step.step_id, 
-                        "action": step.action, 
-                        "command": step.command, 
-                        "status": "success", 
+                        "step_id": step.step_id,
+                        "action": step.action,
+                        "command": step.command,
+                        "status": "success",
                         "output": f"Mock执行成功: {step.command}"
                     })
                     logger.debug(f"步骤 {step.step_id} 执行完成")
                 
                 result = {
                     "execution_result": {
-                        "plan_id": fix_plan.plan_id if fix_plan else None, 
-                        "executed_steps": executed_steps, 
-                        "overall_status": "success", 
+                        "plan_id": fix_plan.plan_id if fix_plan else None,
+                        "executed_steps": executed_steps,
+                        "overall_status": "success",
                         "summary": f"执行完成，共 {len(executed_steps)} 个步骤"
-                    }, 
+                    },
                     "messages": [f"执行节点: 完成修复方案执行 - {len(executed_steps)} 个步骤"]
                 }
                 
@@ -411,6 +389,6 @@ def create_executor_node():
                     "messages": [f"执行节点: 执行失败 - {str(e)}"]
                 }
             finally:
-                db.close()
+                await db.close()
                 logger.debug("执行节点: 数据库会话已关闭")
     return executor_node

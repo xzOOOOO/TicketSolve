@@ -1,5 +1,22 @@
+"""
+LangGraph 工作流定义
+
+MCP集成说明:
+- 使用 langchain-mcp-adapters 的 MultiServerMCPClient
+- 工作流创建时一次性初始化 MCP 连接，获取所有工具
+- 按类别分组传递给各 Agent 节点，节点内部不再管理连接
+
+技术栈:
+- LangGraph: 状态图编排
+- langchain-mcp-adapters: MCP工具自动适配LangChain
+- FastMCP: MCP Server实现
+"""
+
+import os
+import sys
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from state import SystemState, DiagnosisType, ApprovalStatus
 from nodes import (
     create_router_node,
@@ -12,6 +29,8 @@ from nodes import (
     create_other_handler_node
 )
 from database import AsyncSessionLocal
+from logger import logger
+
 
 def route_by_diagnosis(state: SystemState) -> str:
     diagnosis_type = state.diagnosis_type
@@ -24,22 +43,69 @@ def route_by_diagnosis(state: SystemState) -> str:
     else:
         return "other_handler"
 
+
 def route_by_approval(state: SystemState) -> str:
     if state.approval_status == ApprovalStatus.APPROVED:
         return "execute"
     else:
         return END
 
-def create_async_workflow(llm, checkpointer=None):
+
+def _get_mcp_server_path() -> str:
+    """获取MCP Server脚本绝对路径"""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(current_dir, "mcp_server.py")
+
+
+def _classify_tools(all_tools):
+    """按工具名前缀分类"""
+    db_tools = [t for t in all_tools if t.name.startswith("check_db_")]
+    net_tools = [t for t in all_tools if t.name.startswith("check_network_")]
+    app_tools = [t for t in all_tools if t.name.startswith("check_app_")]
+    return db_tools, net_tools, app_tools
+
+
+async def create_async_workflow(llm, checkpointer=None):
+    """
+    创建异步工作流
+
+    MCP Client 在此处一次性初始化:
+    1. 启动 MCP Server 子进程 (stdio)
+    2. 获取所有工具并按类别分组
+    3. 将分组工具注入各 Agent 节点
+    4. 节点内部只使用工具，不管理连接
+    """
+    # 初始化 MCP Client（一次性）
+    mcp_server_path = _get_mcp_server_path()
+    mcp_client = MultiServerMCPClient(
+        {
+            "diagnosis": {
+                "transport": "stdio",
+                "command": sys.executable,
+                "args": [mcp_server_path],
+            }
+        }
+    )
+
+    # 获取所有 MCP 工具（自动转换为 LangChain BaseTool）
+    all_tools = await mcp_client.get_tools()
+    logger.info(f"MCP工具加载完成，共 {len(all_tools)} 个: {[t.name for t in all_tools]}")
+
+    # 按类别分组
+    db_tools, net_tools, app_tools = _classify_tools(all_tools)
+    logger.info(f"工具分组 - DB: {len(db_tools)}, Net: {len(net_tools)}, App: {len(app_tools)}")
+
+    # 创建节点（注入对应工具）
     router_node = create_router_node(llm)
-    db_agent_node = create_db_agent_node(llm)
-    net_agent_node = create_net_agent_node(llm)
-    app_agent_node = create_app_agent_node(llm)
+    db_agent_node = create_db_agent_node(llm, db_tools)
+    net_agent_node = create_net_agent_node(llm, net_tools)
+    app_agent_node = create_app_agent_node(llm, app_tools)
     fix_agent_node = create_fix_agent_node(llm)
     human_approval_node = create_human_approval_node()
     executor_node = create_executor_node()
     other_handler_node = create_other_handler_node()
 
+    # 构建状态图
     workflow = StateGraph(SystemState)
 
     workflow.add_node("router", router_node)
@@ -53,7 +119,10 @@ def create_async_workflow(llm, checkpointer=None):
 
     workflow.set_entry_point("router")
 
-    workflow.add_conditional_edges("router", route_by_diagnosis, {"db_agent": "db_agent", "net_agent": "net_agent", "app_agent": "app_agent", "other_handler": "other_handler"})
+    workflow.add_conditional_edges(
+        "router", route_by_diagnosis,
+        {"db_agent": "db_agent", "net_agent": "net_agent", "app_agent": "app_agent", "other_handler": "other_handler"}
+    )
 
     workflow.add_edge("db_agent", "fix_agent")
     workflow.add_edge("net_agent", "fix_agent")
@@ -61,10 +130,12 @@ def create_async_workflow(llm, checkpointer=None):
 
     workflow.add_edge("fix_agent", "human_approval")
 
-    workflow.add_conditional_edges("human_approval", route_by_approval, {"execute": "execute", END: END})
+    workflow.add_conditional_edges(
+        "human_approval", route_by_approval,
+        {"execute": "execute", END: END}
+    )
 
     workflow.add_edge("execute", END)
-    
     workflow.add_edge("other_handler", END)
 
     if checkpointer:
