@@ -1,16 +1,22 @@
 """
-LangGraph 工作流定义
+LangGraph 工作流定义 - Multi-Agent 架构
+
+工作流结构:
+    Supervisor → Dispatch(并行派发) → Aggregate(聚合推理) → Fix → Human Approval → Executor
+                    ↓ (other/无Agent)
+                Other Handler → END
+
+核心改造:
+- Supervisor 替代原 Router，支持并行派发多个 Agent
+- Dispatch 节点并行执行被派发的 Agent
+- Aggregate 节点综合多个 Agent 的诊断结果
+- Fix Agent 优先使用聚合诊断结果
+- Agent 间通过 CommunicationBus 通信
 
 MCP集成说明:
 - 使用 langchain-mcp-adapters 的 MultiServerMCPClient
 - 工作流创建时一次性初始化 MCP 连接，获取所有工具
 - 按类别分组传递给各 Agent 节点，节点内部不再管理连接
-
-Multi-Agent 改造说明:
-- 原 nodes.py 函数式节点已重构为 agents/ 目录下的 Agent 类
-- 每个 Agent 拥有独立身份（name, role），通过 run() 方法执行
-- 返回格式与原节点完全一致，确保兼容
-- human_approval / executor / other_handler 暂保留函数式实现
 
 技术栈:
 - LangGraph: 状态图编排
@@ -23,34 +29,37 @@ import sys
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from state import SystemState, DiagnosisType, ApprovalStatus
-from agents import RouterAgent, DBAgent, NetAgent, AppAgent, FixAgent
+from state import SystemState, ApprovalStatus
+from agents import (
+    SupervisorAgent,
+    DBAgent,
+    NetAgent,
+    AppAgent,
+    FixAgent,
+    CommunicationBus,
+)
 from nodes import (
+    create_dispatch_node,
+    create_aggregate_node,
     create_human_approval_node,
     create_executor_node,
-    create_other_handler_node
+    create_other_handler_node,
 )
-from database import AsyncSessionLocal
 from logger import logger
 
 
-def route_by_diagnosis(state: SystemState) -> str:
-    diagnosis_type = state.diagnosis_type
-    if diagnosis_type == DiagnosisType.DB:
-        return "db_agent"
-    elif diagnosis_type == DiagnosisType.NET:
-        return "net_agent"
-    elif diagnosis_type == DiagnosisType.APP:
-        return "app_agent"
-    else:
-        return "other_handler"
+def route_after_supervisor(state: SystemState) -> str:
+    """Supervisor 后路由：有派发Agent则进入dispatch，否则走other_handler"""
+    if state.dispatched_agents:
+        return "dispatch"
+    return "other_handler"
 
 
 def route_by_approval(state: SystemState) -> str:
+    """审批后路由：批准则执行，否则结束"""
     if state.approval_status == ApprovalStatus.APPROVED:
         return "execute"
-    else:
-        return END
+    return END
 
 
 def _get_mcp_server_path() -> str:
@@ -69,7 +78,15 @@ def _classify_tools(all_tools):
 
 async def create_async_workflow(llm, checkpointer=None):
     """
-    创建异步工作流
+    创建 Multi-Agent 异步工作流
+
+    流程:
+    1. Supervisor 分析症状，决定派发哪些 Agent
+    2. Dispatch 并行执行被派发的 Agent
+    3. Aggregate 综合各 Agent 诊断结果
+    4. Fix Agent 生成修复方案
+    5. Human Approval 人工审批
+    6. Executor 执行修复
 
     MCP Client 在此处一次性初始化:
     1. 启动 MCP Server 子进程 (stdio)
@@ -98,11 +115,23 @@ async def create_async_workflow(llm, checkpointer=None):
     logger.info(f"工具分组 - DB: {len(db_tools)}, Net: {len(net_tools)}, App: {len(app_tools)}")
 
     # 创建 Agent 实例（注入对应工具）
-    router_agent = RouterAgent(llm)
+    supervisor_agent = SupervisorAgent(llm)
     db_agent = DBAgent(llm, db_tools)
     net_agent = NetAgent(llm, net_tools)
     app_agent = AppAgent(llm, app_tools)
     fix_agent = FixAgent(llm)
+    communication_bus = CommunicationBus()
+
+    # 构建 Agent runner 映射（供 dispatch 节点并行调用）
+    agent_runners = {
+        "db_agent": db_agent.run,
+        "net_agent": net_agent.run,
+        "app_agent": app_agent.run,
+    }
+
+    # 创建工作流节点
+    dispatch_node = create_dispatch_node(agent_runners)
+    aggregate_node = create_aggregate_node(llm)
     human_approval_node = create_human_approval_node()
     executor_node = create_executor_node()
     other_handler_node = create_other_handler_node()
@@ -110,36 +139,42 @@ async def create_async_workflow(llm, checkpointer=None):
     # 构建状态图
     workflow = StateGraph(SystemState)
 
-    workflow.add_node("router", router_agent.run)
-    workflow.add_node("db_agent", db_agent.run)
-    workflow.add_node("net_agent", net_agent.run)
-    workflow.add_node("app_agent", app_agent.run)
+    # 添加节点
+    workflow.add_node("supervisor", supervisor_agent.run)
+    workflow.add_node("dispatch", dispatch_node)
+    workflow.add_node("aggregate", aggregate_node)
     workflow.add_node("fix_agent", fix_agent.run)
     workflow.add_node("human_approval", human_approval_node)
     workflow.add_node("execute", executor_node)
     workflow.add_node("other_handler", other_handler_node)
 
-    workflow.set_entry_point("router")
+    # 设置入口
+    workflow.set_entry_point("supervisor")
 
+    # Supervisor → 有Agent派发则走dispatch，否则走other_handler
     workflow.add_conditional_edges(
-        "router", route_by_diagnosis,
-        {"db_agent": "db_agent", "net_agent": "net_agent", "app_agent": "app_agent", "other_handler": "other_handler"}
+        "supervisor",
+        route_after_supervisor,
+        {"dispatch": "dispatch", "other_handler": "other_handler"},
     )
 
-    workflow.add_edge("db_agent", "fix_agent")
-    workflow.add_edge("net_agent", "fix_agent")
-    workflow.add_edge("app_agent", "fix_agent")
-
+    # Dispatch → Aggregate → Fix（固定流程）
+    workflow.add_edge("dispatch", "aggregate")
+    workflow.add_edge("aggregate", "fix_agent")
     workflow.add_edge("fix_agent", "human_approval")
 
+    # 审批后路由：批准则执行，否则结束
     workflow.add_conditional_edges(
-        "human_approval", route_by_approval,
-        {"execute": "execute", END: END}
+        "human_approval",
+        route_by_approval,
+        {"execute": "execute", END: END},
     )
 
+    # 执行完成 → 结束
     workflow.add_edge("execute", END)
     workflow.add_edge("other_handler", END)
 
+    # 编译工作流（带检查点）
     if checkpointer:
         app = workflow.compile(checkpointer=checkpointer)
     else:

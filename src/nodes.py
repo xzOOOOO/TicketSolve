@@ -1,5 +1,12 @@
 """
-所有节点定义 - 整合 router, agents, fix, approval, executor
+所有节点定义 - 整合 supervisor, dispatch, agents, aggregate, fix, approval, executor
+
+Multi-Agent 改造说明:
+- Agent 类（DBAgent/NetAgent/AppAgent/SupervisorAgent/FixAgent）在 agents/ 目录
+- 本文件保留工作流节点函数（非 Agent 类的节点）
+- 新增 dispatch_node: 根据 Supervisor 决策并行派发 Agent
+- 新增 aggregate_node: 综合多个 Agent 诊断结果
+- 原有节点（human_approval/executor/other_handler）保持不变
 
 MCP集成说明:
 - 工具由 workflow.py 在创建时通过 langchain-mcp-adapters 一次性获取
@@ -13,17 +20,20 @@ MCP集成说明:
 - langchain-mcp-adapters: MCP工具自动适配
 """
 
+import asyncio
 import json
+from typing import Callable, Awaitable
 from state import SystemState, DiagnosisType, ApprovalStatus
 from prompts import (
     ROUTER_PROMPT, DB_PROMPT, DB_DIAGNOSIS_PROMPT,
     NET_PROMPT, NET_DIAGNOSIS_PROMPT,
     APP_PROMPT, APP_DIAGNOSIS_PROMPT,
-    FIX_PROMPT
+    FIX_PROMPT, AGGREGATE_PROMPT
 )
 from langgraph.types import interrupt
 from langgraph.errors import GraphInterrupt
 from database import AsyncSessionLocal, save_ticket
+from utils import parse_json_content
 from logger import logger
 
 
@@ -392,3 +402,162 @@ def create_executor_node():
                 await db.close()
                 logger.debug("执行节点: 数据库会话已关闭")
     return executor_node
+
+
+# ============================================================
+# Multi-Agent 节点: 并行派发 + 聚合推理
+# ============================================================
+
+def create_dispatch_node(agent_runners: dict[str, Callable[[SystemState], Awaitable[dict]]]):
+    """
+    创建并行派发节点
+
+    根据 Supervisor 的 dispatched_agents 列表，并行调用被派发的 Agent。
+    使用 asyncio.gather 实现并行执行，各 Agent 结果合并写入 state。
+
+    Args:
+        agent_runners: Agent 名称 → run 方法的映射
+            {"db_agent": db_agent.run, "net_agent": net_agent.run, ...}
+    """
+    async def dispatch_node(state: SystemState) -> dict:
+        dispatched = state.dispatched_agents
+
+        if not dispatched:
+            logger.info("[Dispatch] 无 Agent 被派发，跳过诊断")
+            return {"messages": ["Dispatch: 无需诊断Agent，直接处理"]}
+
+        logger.info(f"[Dispatch] 并行派发 Agent: {dispatched}")
+
+        tasks = []
+        agent_names = []
+        for agent_name in dispatched:
+            runner = agent_runners.get(agent_name)
+            if runner:
+                tasks.append(runner(state))
+                agent_names.append(agent_name)
+            else:
+                logger.warning(f"[Dispatch] 未找到 Agent: {agent_name}")
+
+        if not tasks:
+            logger.warning("[Dispatch] 没有可执行的 Agent")
+            return {"messages": ["Dispatch: 无可用Agent执行"]}
+
+        # 并行执行所有被派发的 Agent
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 合并各 Agent 的返回结果
+        merged = {"messages": []}
+        for agent_name, result in zip(agent_names, results):
+            if isinstance(result, Exception):
+                logger.error(f"[Dispatch] Agent {agent_name} 执行异常: {result}")
+                merged["messages"].append(f"Dispatch: {agent_name} 执行异常 - {str(result)}")
+                continue
+
+            if isinstance(result, dict):
+                for key, value in result.items():
+                    if key == "messages":
+                        merged["messages"].extend(value)
+                    else:
+                        merged[key] = value
+
+        logger.info(f"[Dispatch] 并行执行完成，{len(agent_names)} 个 Agent 返回结果")
+        return merged
+
+    return dispatch_node
+
+
+def create_aggregate_node(llm):
+    """
+    创建聚合推理节点
+
+    综合多个 Agent 的诊断结果，给出最终诊断结论。
+    - 只有一个 Agent 返回结果 → 直接采用
+    - 多个 Agent 返回结果 → LLM 聚合推理，加权判断
+
+    Args:
+        llm: LLM 实例，用于聚合推理
+    """
+    async def aggregate_node(state: SystemState) -> dict:
+        # 收集所有已执行的 Agent 诊断结果
+        agent_results = {}
+
+        if state.db_agent_result:
+            agent_results["db_agent"] = state.db_agent_result
+        if state.net_agent_result:
+            agent_results["net_agent"] = state.net_agent_result
+        if state.app_agent_result:
+            agent_results["app_agent"] = state.app_agent_result
+
+        if not agent_results:
+            logger.info("[Aggregate] 无 Agent 诊断结果，跳过聚合")
+            return {
+                "aggregated_diagnosis": None,
+                "messages": ["Aggregate: 无诊断结果可聚合"],
+            }
+
+        # 单 Agent 结果直接采用，无需 LLM 聚合
+        if len(agent_results) == 1:
+            agent_name = list(agent_results.keys())[0]
+            single_result = agent_results[agent_name]
+            logger.info(f"[Aggregate] 只有 {agent_name} 返回结果，直接采用")
+
+            aggregated = {
+                "diagnosis": single_result.get("diagnosis", "未知"),
+                "possible_causes": single_result.get("possible_causes", []),
+                "confidence": 0.7,
+                "contributing_agents": [agent_name],
+                "reasoning": f"仅 {agent_name} 返回诊断结果，直接采用",
+            }
+            return {
+                "aggregated_diagnosis": aggregated,
+                "messages": [f"Aggregate: 采用 {agent_name} 的诊断结论"],
+            }
+
+        # 多 Agent 结果需要 LLM 聚合推理
+        logger.info(f"[Aggregate] 聚合 {len(agent_results)} 个 Agent 的诊断结果: {list(agent_results.keys())}")
+
+        try:
+            results_str = ""
+            for name, result in agent_results.items():
+                results_str += f"\n--- {name} ---\n"
+                results_str += f"诊断: {result.get('diagnosis', '未知')}\n"
+                results_str += f"可能原因: {result.get('possible_causes', [])}\n"
+
+            response = await (AGGREGATE_PROMPT | llm).ainvoke({
+                "symptom": state.symptom,
+                "agent_results": results_str,
+            })
+            aggregated = parse_json_content(response.content) or {
+                "diagnosis": "聚合分析失败",
+                "possible_causes": [],
+                "confidence": 0.0,
+                "contributing_agents": list(agent_results.keys()),
+                "reasoning": "LLM 聚合推理失败",
+            }
+
+            logger.info(
+                f"[Aggregate] 聚合完成: diagnosis={aggregated.get('diagnosis')}, "
+                f"confidence={aggregated.get('confidence')}"
+            )
+
+            return {
+                "aggregated_diagnosis": aggregated,
+                "messages": [
+                    f"Aggregate: 综合诊断={aggregated.get('diagnosis')}, "
+                    f"置信度={aggregated.get('confidence')}"
+                ],
+            }
+        except Exception as e:
+            logger.exception(f"[Aggregate] 聚合推理失败: {e}")
+            return {
+                "aggregated_diagnosis": {
+                    "diagnosis": "聚合推理异常",
+                    "possible_causes": [],
+                    "confidence": 0.0,
+                    "contributing_agents": list(agent_results.keys()),
+                    "reasoning": f"异常: {str(e)}",
+                },
+                "messages": [f"Aggregate: 聚合推理失败 - {str(e)}"],
+            }
+
+    return aggregate_node

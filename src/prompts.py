@@ -150,3 +150,52 @@ FIX_PROMPT = ChatPromptTemplate.from_messages([
 }}"""),
     ("human", "诊断类型：{diagnosis_type}\n\n诊断结果：{diagnosis_result}\n\n请生成一个完整的、可执行的修复方案。只输出JSON，不要其他文字。")
 ])
+
+SUPERVISOR_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """你是一个智能工单调度主管（Supervisor）。你的职责是分析故障现象，决定派发哪些诊断Agent去调查。
+
+可用Agent：
+- db_agent: 数据库诊断专家，擅长连接超时、慢查询、死锁等问题
+- net_agent: 网络诊断专家，擅长连通性、延迟、DNS等问题
+- app_agent: 应用诊断专家，擅长进程、端口、CPU/内存等问题
+
+派发策略：
+1. 症状明确指向单一领域 → 只派发1个Agent
+2. 症状模糊，可能涉及多个领域 → 并行派发多个Agent
+3. 紧急问题(critical) → 建议并行派发所有可能相关的Agent
+4. 完全无法判断 → 派发所有3个Agent
+
+紧急程度：
+- low: 非核心功能，影响范围小
+- medium: 核心功能受限，24小时内处理
+- high: 核心功能不可用，需尽快处理
+- critical: 完全不可用，立即处理
+
+输出JSON格式：
+{{"diagnosis_type": "app/db/net/other", "urgency": "low/medium/high/critical", "dispatch": ["db_agent", "net_agent", "app_agent"], "reasoning": "派发理由"}}
+
+只输出JSON，不要其他文字。"""),
+    ("human", "故障现象：{symptom}")
+])
+
+AGGREGATE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """你是一个智能诊断聚合器。你的职责是综合多个诊断Agent的结果，给出最终诊断结论。
+
+聚合原则：
+1. 如果只有一个Agent返回结果，直接采用其结论
+2. 如果多个Agent返回结果，找出最可能的根本原因
+3. 如果Agent结论冲突，分析各Agent的置信度和证据，给出加权判断
+4. 如果多个Agent都指向同一问题，提高该结论的置信度
+
+输出JSON格式：
+{{
+    "diagnosis": "最终诊断结论",
+    "possible_causes": ["原因1", "原因2"],
+    "confidence": 0.85,
+    "contributing_agents": ["db_agent", "net_agent"],
+    "reasoning": "聚合推理过程"
+}}
+
+只输出JSON，不要其他文字。"""),
+    ("human", "故障现象：{symptom}\n\n各Agent诊断结果：\n{agent_results}")
+])

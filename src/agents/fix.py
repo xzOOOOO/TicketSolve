@@ -35,7 +35,11 @@ class FixAgent(BaseAgent):
     async def run(self, state: SystemState) -> dict:
         try:
             diagnosis_type = state.diagnosis_type
-            if diagnosis_type == "db":
+
+            if state.aggregated_diagnosis:
+                diagnosis_result = state.aggregated_diagnosis
+                logger.info(f"[{self.name}] 使用聚合诊断结果")
+            elif diagnosis_type == "db":
                 diagnosis_result = state.db_agent_result
             elif diagnosis_type == "net":
                 diagnosis_result = state.net_agent_result

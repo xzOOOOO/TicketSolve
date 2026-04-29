@@ -40,32 +40,42 @@ class FixPlan(BaseModel):
     """修复方案"""
     plan_id: str = Field(..., description="方案ID")
     description: str = Field(..., description="方案描述")
+    risk_level: str = Field("low", description="风险等级: low/medium/high")
+    prerequisites: List[str] = Field(default_factory=list, description="前置条件")
     steps: List[FixStep] = Field(default_factory=list, description="修复步骤列表")
+    verification: Dict[str, Any] = Field(default_factory=dict, description="验证方法")
     estimated_time: str = Field("", description="预计执行时间")
+
+
+class AgentMessage(BaseModel):
+    """Agent 间通信消息"""
+    sender: str = Field(..., description="发送者 Agent 名称")
+    receiver: str = Field("broadcast", description="接收者，broadcast 表示广播")
+    content: str = Field(..., description="消息内容")
+    msg_type: str = Field("info", description="消息类型: diagnosis/question/request_help/disagreement")
+    confidence: float = Field(0.0, description="置信度 0-1")
+    evidence: List[str] = Field(default_factory=list, description="支撑证据")
 
 
 class SystemState(BaseModel):
     """
     LangGraph工作流状态模型
 
-    这个类定义了工单处理全流程的状态，包括：
-    - 输入：工单症状
-    - 路由决策：诊断类型
-    - Agent诊断结果：DB/Net/App三个Agent的输出
-    - 聚合诊断：综合分析结果
-    - 修复方案：Fix Agent生成的方案
-    - 人工审批：审批状态和意见
-    - 执行结果：最终执行反馈
+    Multi-Agent 改造:
+    - supervisor_decision: Supervisor 的派发决策（替代原 router 单路由）
+    - agent_messages: Agent 间通信消息（支持协作诊断）
+    - dispatched_agents: 当前被派发的 Agent 列表
     """
 
     # ========== 输入信息 ==========
     ticket_id: str = Field(..., description="工单ID")
     symptom: str = Field(..., description="故障现象描述")
 
-    # ========== 路由决策 ==========
+    # ========== Supervisor 决策 ==========
     diagnosis_type: Optional[DiagnosisType] = Field(None, description="诊断类型: app/db/net/other")
     urgency: Optional[Urgency] = Field(None, description="紧急程度: low/medium/high/critical")
-
+    supervisor_decision: Optional[Dict[str, Any]] = Field(None, description="Supervisor派发决策")
+    dispatched_agents: List[str] = Field(default_factory=list, description="被派发的Agent列表")
 
     # ========== Agent诊断结果 ==========
     db_agent_result: Optional[Dict[str, Any]] = Field(None, description="数据库Agent诊断结果")
@@ -74,6 +84,9 @@ class SystemState(BaseModel):
 
     # ========== 聚合诊断 ==========
     aggregated_diagnosis: Optional[Dict[str, Any]] = Field(None, description="综合诊断结果")
+
+    # ========== Agent 间通信 ==========
+    agent_messages: Annotated[List[Dict[str, Any]], operator.add] = Field(default_factory=list, description="Agent间通信消息")
 
     # ========== 修复方案 ==========
     fix_plan: Optional[FixPlan] = Field(None, description="Fix Agent生成的修复方案")
