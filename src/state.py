@@ -85,6 +85,10 @@ class SystemState(BaseModel):
     # ========== 聚合诊断 ==========
     aggregated_diagnosis: Optional[Dict[str, Any]] = Field(None, description="综合诊断结果")
 
+    # ========== 动态调度 ==========
+    dispatch_round: int = Field(0, description="当前调度轮次（防止无限循环）")
+    max_dispatch_rounds: int = Field(3, description="最大动态调度轮次")
+
     # ========== Agent 间通信 ==========
     agent_messages: Annotated[List[Dict[str, Any]], operator.add] = Field(default_factory=list, description="Agent间通信消息")
 

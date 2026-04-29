@@ -143,16 +143,4 @@ class BaseAgent(ABC):
 
         return all_tool_results, all_tool_calls_info
 
-    def __call__(self, state: Any) -> Any:
-        import asyncio
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        return loop.run_until_complete(self.run(state))
-
-    def get_tools_by_prefix(self, prefix: str) -> list[BaseTool]:
-        return [t for t in self.tools if t.name.startswith(prefix)]

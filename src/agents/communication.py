@@ -2,9 +2,9 @@
 CommunicationBus - Agent 间通信总线
 
 设计原则:
-- 基于 state.agent_messages 字段，不引入外部依赖
-- Agent 通过 send/broadcast 写入消息
-- Agent 通过 receive 读取发给自己的消息
+- 无状态：不维护内部缓冲区，所有消息通过 state.agent_messages 流转
+- Agent 通过 send/broadcast 生成消息字典，返回值写入 state
+- Agent 通过 receive 从 state.agent_messages 中过滤属于自己的消息
 - 消息追加式写入（operator.add），不覆盖
 """
 
@@ -15,20 +15,17 @@ from logger import logger
 
 class CommunicationBus:
     """
-    Agent 间通信总线
+    Agent 间通信总线（无状态）
 
     使用方式:
-    1. Agent 诊断过程中发现需要其他 Agent 协助 → bus.send()
-    2. Agent 诊断完成后广播结论 → bus.broadcast()
+    1. Agent 诊断过程中发现需要其他 Agent 协助 → bus.send()，返回值写入 state.agent_messages
+    2. Agent 诊断完成后广播结论 → bus.broadcast()，返回值写入 state.agent_messages
     3. Agent 开始诊断前检查是否有其他 Agent 的消息 → bus.receive()
     """
 
-    def __init__(self):
-        self._pending: list[dict] = []
-
     def send(self, sender: str, receiver: str, content: str,
              msg_type: str = "info", confidence: float = 0.0,
-             evidence: Optional[list[str]] = None) -> dict:
+             evidence: Optional[list[str]] = None) -> list[dict]:
         """
         发送消息给指定 Agent
 
@@ -41,7 +38,7 @@ class CommunicationBus:
             evidence: 支撑证据
 
         Returns:
-            可写入 state.agent_messages 的字典
+            可写入 state.agent_messages 的消息列表
         """
         msg = AgentMessage(
             sender=sender,
@@ -52,7 +49,6 @@ class CommunicationBus:
             evidence=evidence or [],
         )
         msg_dict = msg.model_dump()
-        self._pending.append(msg_dict)
         logger.debug(f"[Bus] {sender} → {receiver}: [{msg_type}] {content[:50]}...")
         return [msg_dict]
 
@@ -63,7 +59,7 @@ class CommunicationBus:
         广播消息给所有 Agent
 
         Returns:
-            可写入 state.agent_messages 的列表
+            可写入 state.agent_messages 的消息列表
         """
         msg = AgentMessage(
             sender=sender,
@@ -74,7 +70,6 @@ class CommunicationBus:
             evidence=evidence or [],
         )
         msg_dict = msg.model_dump()
-        self._pending.append(msg_dict)
         logger.debug(f"[Bus] {sender} → broadcast: [{msg_type}] {content[:50]}...")
         return [msg_dict]
 
@@ -95,14 +90,3 @@ class CommunicationBus:
                 if msg.get("sender") != agent_name:
                     received.append(msg)
         return received
-
-    def flush(self) -> list[dict]:
-        """
-        取出所有待发送消息并清空缓冲区
-
-        Returns:
-            所有待发送消息列表，用于写入 state.agent_messages
-        """
-        pending = self._pending.copy()
-        self._pending.clear()
-        return pending

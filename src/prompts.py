@@ -4,29 +4,6 @@
 from langchain_core.prompts import ChatPromptTemplate
 
 
-ROUTER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """你是一个专业的工单分类助手。分析故障现象，输出JSON格式的判断结果。
-
-类型定义：
-- diagnosis_type:
-  - app: 应用问题（进程、内存、CPU、端口、线程）
-  - db: 数据库问题（连接超时、慢查询、死锁）
-  - net: 网络问题（连通性、延迟、DNS）
-  - other: 其他问题（配置、权限、第三方）
-
-- urgency:
-  - low: 非核心功能，影响范围小
-  - medium: 核心功能受限，24小时内处理
-  - high: 核心功能不可用，需尽快处理
-  - critical: 完全不可用，立即处理
-
-输出JSON格式：
-{{"diagnosis_type": "app/db/net/other", "urgency": "low/medium/high/critical"}}
-
-只输出JSON，不要其他文字。"""),
-    ("human", "故障现象：{symptom}")
-])
-
 DB_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """你是一位资深数据库工程师，擅长使用工具诊断数据库问题。
 
@@ -50,10 +27,17 @@ DB_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
 工具返回结果：
 {tool_results}
 
+其他Agent的通信消息：
+{peer_messages}
+
 请基于以上信息，给出诊断结论。
 
 输出JSON格式：
-{{"diagnosis": "具体诊断", "possible_causes": ["原因1", "原因2"]}}
+{{"diagnosis": "具体诊断", "possible_causes": ["原因1", "原因2"], "confidence": 0.8, "need_collaboration": ["net_agent"]}}
+
+字段说明：
+- confidence: 诊断置信度 0-1
+- need_collaboration: 如果你的诊断发现可能涉及其他领域问题，列出需要协助的Agent名称。例如数据库连接超时可能需要net_agent检查网络，应用层连接泄漏可能需要app_agent检查。如不需要协作则为空列表[]。
 
 只输出JSON，不要其他文字。""")
 ])
@@ -80,10 +64,17 @@ NET_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
 工具返回结果：
 {tool_results}
 
+其他Agent的通信消息：
+{peer_messages}
+
 请基于以上信息，给出诊断结论。
 
 输出JSON格式：
-{{"diagnosis": "具体诊断", "possible_causes": ["原因1", "原因2"]}}
+{{"diagnosis": "具体诊断", "possible_causes": ["原因1", "原因2"], "confidence": 0.8, "need_collaboration": ["db_agent"]}}
+
+字段说明：
+- confidence: 诊断置信度 0-1
+- need_collaboration: 如果你的诊断发现可能涉及其他领域问题，列出需要协助的Agent名称。例如网络延迟导致数据库超时可能需要db_agent确认，网络端口被占用可能需要app_agent检查。如不需要协作则为空列表[]。
 
 只输出JSON，不要其他文字。""")
 ])
@@ -110,10 +101,17 @@ APP_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
 工具返回结果：
 {tool_results}
 
+其他Agent的通信消息：
+{peer_messages}
+
 请基于以上信息，给出诊断结论。
 
 输出JSON格式：
-{{"diagnosis": "具体诊断", "possible_causes": ["原因1", "原因2"]}}
+{{"diagnosis": "具体诊断", "possible_causes": ["原因1", "原因2"], "confidence": 0.8, "need_collaboration": ["db_agent"]}}
+
+字段说明：
+- confidence: 诊断置信度 0-1
+- need_collaboration: 如果你的诊断发现可能涉及其他领域问题，列出需要协助的Agent名称。例如应用连接池耗尽可能需要db_agent检查数据库端，DNS解析失败可能需要net_agent检查网络。如不需要协作则为空列表[]。
 
 只输出JSON，不要其他文字。""")
 ])

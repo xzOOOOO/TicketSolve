@@ -2,13 +2,16 @@
 LangGraph 工作流定义 - Multi-Agent 架构
 
 工作流结构:
-    Supervisor → Dispatch(并行派发) → Aggregate(聚合推理) → Fix → Human Approval → Executor
+    Supervisor → Dispatch(并行派发) → DynamicCheck → [有协作请求?]
+                                                    ├─ 是 → Dispatch(追加派发) → DynamicCheck → ...
+                                                    └─ 否 → Aggregate(聚合推理) → Fix → Human Approval → Executor
                     ↓ (other/无Agent)
                 Other Handler → END
 
 核心改造:
 - Supervisor 替代原 Router，支持并行派发多个 Agent
 - Dispatch 节点并行执行被派发的 Agent
+- DynamicCheck 节点扫描 Agent 间 request_help 消息，动态追加派发
 - Aggregate 节点综合多个 Agent 的诊断结果
 - Fix Agent 优先使用聚合诊断结果
 - Agent 间通过 CommunicationBus 通信
@@ -40,6 +43,7 @@ from agents import (
 )
 from nodes import (
     create_dispatch_node,
+    create_dynamic_check_node,
     create_aggregate_node,
     create_human_approval_node,
     create_executor_node,
@@ -53,6 +57,13 @@ def route_after_supervisor(state: SystemState) -> str:
     if state.dispatched_agents:
         return "dispatch"
     return "other_handler"
+
+
+def route_after_dynamic_check(state: SystemState) -> str:
+    """DynamicCheck 后路由：有新派发Agent则循环回dispatch，否则进入aggregate"""
+    if state.dispatched_agents:
+        return "dispatch"
+    return "aggregate"
 
 
 def route_by_approval(state: SystemState) -> str:
@@ -114,13 +125,13 @@ async def create_async_workflow(llm, checkpointer=None):
     db_tools, net_tools, app_tools = _classify_tools(all_tools)
     logger.info(f"工具分组 - DB: {len(db_tools)}, Net: {len(net_tools)}, App: {len(app_tools)}")
 
-    # 创建 Agent 实例（注入对应工具）
-    supervisor_agent = SupervisorAgent(llm)
-    db_agent = DBAgent(llm, db_tools)
-    net_agent = NetAgent(llm, net_tools)
-    app_agent = AppAgent(llm, app_tools)
-    fix_agent = FixAgent(llm)
     communication_bus = CommunicationBus()
+
+    supervisor_agent = SupervisorAgent(llm)
+    db_agent = DBAgent(llm, db_tools, communication_bus)
+    net_agent = NetAgent(llm, net_tools, communication_bus)
+    app_agent = AppAgent(llm, app_tools, communication_bus)
+    fix_agent = FixAgent(llm)
 
     # 构建 Agent runner 映射（供 dispatch 节点并行调用）
     agent_runners = {
@@ -131,7 +142,8 @@ async def create_async_workflow(llm, checkpointer=None):
 
     # 创建工作流节点
     dispatch_node = create_dispatch_node(agent_runners)
-    aggregate_node = create_aggregate_node(llm)
+    dynamic_check_node = create_dynamic_check_node()
+    aggregate_node = create_aggregate_node(llm, communication_bus)
     human_approval_node = create_human_approval_node()
     executor_node = create_executor_node()
     other_handler_node = create_other_handler_node()
@@ -142,6 +154,7 @@ async def create_async_workflow(llm, checkpointer=None):
     # 添加节点
     workflow.add_node("supervisor", supervisor_agent.run)
     workflow.add_node("dispatch", dispatch_node)
+    workflow.add_node("dynamic_check", dynamic_check_node)
     workflow.add_node("aggregate", aggregate_node)
     workflow.add_node("fix_agent", fix_agent.run)
     workflow.add_node("human_approval", human_approval_node)
@@ -158,8 +171,17 @@ async def create_async_workflow(llm, checkpointer=None):
         {"dispatch": "dispatch", "other_handler": "other_handler"},
     )
 
-    # Dispatch → Aggregate → Fix（固定流程）
-    workflow.add_edge("dispatch", "aggregate")
+    # Dispatch → DynamicCheck（检查是否需要追加派发）
+    workflow.add_edge("dispatch", "dynamic_check")
+
+    # DynamicCheck → 有协作请求则循环回dispatch，否则进入aggregate
+    workflow.add_conditional_edges(
+        "dynamic_check",
+        route_after_dynamic_check,
+        {"dispatch": "dispatch", "aggregate": "aggregate"},
+    )
+
+    # Aggregate → Fix → Human Approval（固定流程）
     workflow.add_edge("aggregate", "fix_agent")
     workflow.add_edge("fix_agent", "human_approval")
 
