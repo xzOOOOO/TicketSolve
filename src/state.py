@@ -29,11 +29,20 @@ class ApprovalStatus(str, Enum):
 
 
 class FixStep(BaseModel):
-    """修复步骤"""
+    """修复步骤
+
+    Structured Output 改造说明：
+    - 新增 expected_output、on_failure、rollback_command 三个 Optional 字段
+    - 原因：FixPlanOutput（LLM 结构化输出模型）中的步骤包含这些字段
+    - 设计为 Optional 以保持向后兼容：已有数据不会报错，新数据可以完整存储
+    """
     step_id: int = Field(..., description="步骤编号")
     action: str = Field(..., description="修复动作描述")
     command: Optional[str] = Field(None, description="执行的命令")
     risk_level: str = Field("low", description="风险等级: low/medium/high")
+    expected_output: Optional[str] = Field(None, description="预期输出")
+    on_failure: Optional[str] = Field(None, description="失败时的处理方式")
+    rollback_command: Optional[str] = Field(None, description="回滚命令")
 
 
 class FixPlan(BaseModel):
@@ -101,6 +110,12 @@ class SystemState(BaseModel):
 
     # ========== 执行结果 ==========
     execution_result: Optional[Dict[str, Any]] = Field(None, description="执行结果")
+
+    # ========== 审计日志（用于可追溯性） ==========
+    audit_logs: Annotated[List[Dict[str, Any]], operator.add] = Field(
+        default_factory=list,
+        description="Agent 操作审计日志，用于追溯工单处理流程"
+    )
 
     # ========== 辅助字段 ==========
     messages: Annotated[List[str], operator.add] = Field(default_factory=list, description="处理过程中的消息记录")

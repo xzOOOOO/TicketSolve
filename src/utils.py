@@ -1,58 +1,19 @@
-"""
-公共工具函数
-
-从各 Agent 中提取的共享逻辑:
-- parse_json_content: JSON 解析（兼容 markdown 代码块等格式）
-- execute_tool_calls: 执行 LLM 返回的工具调用
-"""
-
-import json
-from typing import Optional
-
 from logger import logger
 
 
-def parse_json_content(content: str) -> Optional[dict]:
-    """
-    解析 JSON 内容，兼容多种格式:
-    - 标准 JSON
-    - ```json ... ``` 代码块
-    - ``` ... ``` 代码块
-    - 混合文本中提取 JSON
-    """
-    result = None
-    try:
-        result = json.loads(content)
-    except json.JSONDecodeError:
-        try:
-            if "```json" in content:
-                start = content.find("```json") + 7
-                end = content.find("```", start)
-                content = content[start:end].strip()
-            elif "```" in content:
-                start = content.find("```") + 3
-                end = content.find("```", start)
-                content = content[start:end].strip()
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                result = json.loads(content[start:end])
-        except Exception:
-            pass
-    return result
-
-
 async def execute_tool_calls(response, tools, agent_name: str = "agent") -> list:
-    """
-    执行 LLM 返回的工具调用
+    """执行 LLM 返回的工具调用
+
+    在 ReAct 循环中，LLM 决定调用哪些工具后，由本函数实际执行。
+    遍历 response.tool_calls，匹配对应的工具并异步调用。
 
     Args:
-        response: LLM 响应对象（含 tool_calls）
+        response: LLM 响应对象（含 tool_calls 列表）
         tools: 可用工具列表
-        agent_name: Agent 名称（用于日志）
+        agent_name: Agent 名称（用于日志标识）
 
     Returns:
-        工具结果列表: [{"tool": name, "result": result}, ...]
+        工具结果列表，格式: [{"tool": 工具名, "result": 结果}, ...]
     """
     tool_results = []
     for tool_call in response.tool_calls:

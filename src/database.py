@@ -41,6 +41,25 @@ class Ticket(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+
+class TicketAuditLog(Base):
+    """工单审计日志表
+
+    记录每个 Agent 的完整操作轨迹，支持可追溯性查询。
+    按时间顺序排列可还原整个工单处理流程。
+    """
+    __tablename__ = "ticket_audit_logs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    ticket_id = Column(String(50), nullable=False, index=True)
+    agent_name = Column(String(50), nullable=False, index=True)
+    action_type = Column(String(50), nullable=False)
+    action_detail = Column(JSON)
+    input_context = Column(JSON)
+    output_result = Column(JSON)
+    dispatch_round = Column(String(10))
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
 async def init_db():
     """初始化数据库表"""
     try:
@@ -81,21 +100,25 @@ def serialize_value(value):
     return value
 
 async def save_ticket(db: AsyncSession, state: dict):
-    """保存工单到数据库"""
+    """保存工单到数据库
+
+    同时保存审计日志（audit_logs）到 ticket_audit_logs 表，
+    用于后续追溯工单处理流程。
+    """
     ticket_id = state.get("ticket_id", "unknown")
-    
+
     try:
         logger.info(f"开始保存工单: ticket_id={ticket_id}")
         from sqlalchemy import select
 
         result = await db.execute(select(Ticket).filter(Ticket.ticket_id == state["ticket_id"]))
         ticket = result.scalar_one_or_none()
-        
+
         diagnosis_result = state.get("db_agent_result") or state.get("net_agent_result") or state.get("app_agent_result")
         fix_plan = serialize_value(state.get("fix_plan"))
         execution_result = serialize_value(state.get("execution_result"))
         messages = serialize_value(state.get("messages", []))
-        
+
         if ticket:
             logger.debug(f"更新现有工单: ticket_id={ticket_id}")
             ticket.symptom = state.get("symptom", ticket.symptom)
@@ -107,7 +130,7 @@ async def save_ticket(db: AsyncSession, state: dict):
             ticket.approver_comments = state.get("approver_comments")
             ticket.execution_result = execution_result
             ticket.messages = messages
-            
+
             if state.get("approval_status") == "approved":
                 ticket.status = TicketStatus.APPROVED
                 logger.info(f"工单已审批通过: ticket_id={ticket_id}")
@@ -131,12 +154,30 @@ async def save_ticket(db: AsyncSession, state: dict):
                 messages=messages
             )
             db.add(ticket)
-        
+
+        # 保存审计日志（如果有）
+        audit_logs = state.get("audit_logs", [])
+        if audit_logs:
+            logger.info(f"保存 {len(audit_logs)} 条审计日志: ticket_id={ticket_id}")
+            for log_entry in audit_logs:
+                log_entry["ticket_id"] = ticket_id
+                log = TicketAuditLog(
+                    ticket_id=log_entry["ticket_id"],
+                    agent_name=log_entry["agent_name"],
+                    action_type=log_entry["action_type"],
+                    action_detail=serialize_value(log_entry.get("action_detail")),
+                    input_context=serialize_value(log_entry.get("input_context")),
+                    output_result=serialize_value(log_entry.get("output_result")),
+                    dispatch_round=str(log_entry.get("dispatch_round", "")),
+                )
+                db.add(log)
+
         await db.commit()
         await db.refresh(ticket)
+
         logger.info(f"工单保存成功: ticket_id={ticket_id}, status={ticket.status}")
         return ticket
-        
+
     except IntegrityError as e:
         logger.error(f"数据完整性错误: ticket_id={ticket_id}, error={e}")
         await db.rollback()
@@ -162,4 +203,56 @@ async def get_ticket_by_id(db: AsyncSession, ticket_id: str):
 async def get_all_tickets(db: AsyncSession, skip: int = 0, limit: int = 50):
     from sqlalchemy import select
     result = await db.execute(select(Ticket).order_by(Ticket.created_at.desc()).offset(skip).limit(limit))
+    return result.scalars().all()
+
+
+async def save_audit_log(db: AsyncSession, log_entry: dict):
+    """保存审计日志
+
+    将 Agent 的操作轨迹记录到 ticket_audit_logs 表，
+    用于后续追溯工单处理流程。
+
+    Args:
+        db: 数据库会话
+        log_entry: 日志条目，格式:
+            {
+                "ticket_id": "TKT-001",
+                "agent_name": "db_agent",
+                "action_type": "tool_call",
+                "action_detail": {"tools": [...]},
+                "input_context": {"symptom": "..."},
+                "output_result": {"diagnosis": "..."},
+                "dispatch_round": "1"
+            }
+    """
+    try:
+        log = TicketAuditLog(
+            ticket_id=log_entry["ticket_id"],
+            agent_name=log_entry["agent_name"],
+            action_type=log_entry["action_type"],
+            action_detail=serialize_value(log_entry.get("action_detail")),
+            input_context=serialize_value(log_entry.get("input_context")),
+            output_result=serialize_value(log_entry.get("output_result")),
+            dispatch_round=str(log_entry.get("dispatch_round", "")),
+        )
+        db.add(log)
+        await db.commit()
+        logger.debug(f"审计日志已保存: ticket_id={log_entry['ticket_id']}, agent={log_entry['agent_name']}, action={log_entry['action_type']}")
+    except Exception as e:
+        logger.error(f"保存审计日志失败: {e}")
+        await db.rollback()
+
+
+async def get_ticket_audit_logs(db: AsyncSession, ticket_id: str):
+    """查询工单的审计日志
+
+    按时间顺序返回该工单的所有 Agent 操作记录，
+    用于还原完整的处理流程。
+    """
+    from sqlalchemy import select
+    result = await db.execute(
+        select(TicketAuditLog)
+        .filter(TicketAuditLog.ticket_id == ticket_id)
+        .order_by(TicketAuditLog.created_at.asc())
+    )
     return result.scalars().all()

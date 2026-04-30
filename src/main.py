@@ -28,8 +28,8 @@ async def main():
         config = {"configurable": {"thread_id": "test-thread-001"}}
         
         initial_state = {
-            "ticket_id": "TKT-009",
-            "symptom": "app一直转圈圈"
+            "ticket_id": "TKT-010",
+            "symptom": "数据查询不出来"
         }
         
         logger.info("第一次调用工作流...")

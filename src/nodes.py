@@ -9,10 +9,10 @@ import asyncio
 from typing import Callable, Awaitable
 from state import SystemState, ApprovalStatus
 from prompts import AGGREGATE_PROMPT
+from schemas import AggregateOutput
 from langgraph.types import interrupt
 from langgraph.errors import GraphInterrupt
 from database import AsyncSessionLocal, save_ticket
-from utils import parse_json_content
 from logger import logger
 
 
@@ -88,6 +88,8 @@ def create_dispatch_node(agent_runners: dict[str, Callable[[SystemState], Awaita
                         merged["messages"].extend(value)
                     elif key == "agent_messages":
                         merged.setdefault("agent_messages", []).extend(value)
+                    elif key == "audit_logs":
+                        merged.setdefault("audit_logs", []).extend(value)
                     else:
                         merged[key] = value
 
@@ -146,12 +148,17 @@ def create_dynamic_check_node():
 
 
 def create_aggregate_node(llm, communication_bus=None):
-    """
-    创建聚合推理节点
+    """创建聚合推理节点
 
     综合多个 Agent 的诊断结果，给出最终诊断结论。
     - 只有一个 Agent 返回结果 → 直接采用
     - 多个 Agent 返回结果 → LLM 聚合推理，加权判断
+
+    Structured Output 改造说明：
+    - 原方案：LLM 输出 JSON 字符串 -> parse_json_content 解析 -> dict
+    - 新方案：llm.with_structured_output(AggregateOutput)
+             直接返回 Pydantic 对象
+    - 注意：aggregate 是函数式节点（非类），所以 structured_llm 在函数内部创建
 
     Args:
         llm: LLM 实例，用于聚合推理
@@ -207,22 +214,50 @@ def create_aggregate_node(llm, communication_bus=None):
                     for msg in relevant_msgs:
                         results_str += f"[{msg['sender']}→{msg['receiver']}] ({msg['msg_type']}, 置信度:{msg.get('confidence', 0)}) {msg['content']}\n"
 
-            response = await (AGGREGATE_PROMPT | llm).ainvoke({
+            # 使用 Structured Output 进行聚合推理
+            # 在函数内部创建 structured_llm（因为 aggregate 是函数式节点，无 __init__）
+            structured_llm = llm.with_structured_output(AggregateOutput)
+            result = await (AGGREGATE_PROMPT | structured_llm).ainvoke({
                 "symptom": state.symptom,
                 "agent_results": results_str,
             })
-            aggregated = parse_json_content(response.content) or {
-                "diagnosis": "聚合分析失败",
-                "possible_causes": [],
-                "confidence": 0.0,
-                "contributing_agents": list(agent_results.keys()),
-                "reasoning": "LLM 聚合推理失败",
-            }
+
+            # 兜底处理
+            if result is None:
+                aggregated = {
+                    "diagnosis": "聚合分析失败",
+                    "possible_causes": [],
+                    "confidence": 0.0,
+                    "contributing_agents": list(agent_results.keys()),
+                    "reasoning": "Structured Output 解析失败",
+                }
+            else:
+                # Pydantic 对象转 dict，保持与 SystemState 的兼容性
+                aggregated = result.model_dump()
 
             logger.info(
                 f"[Aggregate] 聚合完成: diagnosis={aggregated.get('diagnosis')}, "
                 f"confidence={aggregated.get('confidence')}"
             )
+
+            # 记录审计日志：聚合推理
+            audit_log = {
+                "ticket_id": state.ticket_id,
+                "agent_name": "aggregate",
+                "action_type": "aggregate",
+                "action_detail": {
+                    "contributing_agents": aggregated.get("contributing_agents", []),
+                    "diagnosis": aggregated.get("diagnosis"),
+                    "confidence": aggregated.get("confidence"),
+                    "reasoning": aggregated.get("reasoning"),
+                },
+                "input_context": {
+                    "agent_results": results_str,
+                    "symptom": state.symptom,
+                },
+                "output_result": aggregated,
+                "dispatch_round": state.dispatch_round,
+            }
 
             return {
                 "aggregated_diagnosis": aggregated,
@@ -230,6 +265,7 @@ def create_aggregate_node(llm, communication_bus=None):
                     f"Aggregate: 综合诊断={aggregated.get('diagnosis')}, "
                     f"置信度={aggregated.get('confidence')}"
                 ],
+                "audit_logs": [audit_log],
             }
         except Exception as e:
             logger.exception(f"[Aggregate] 聚合推理失败: {e}")

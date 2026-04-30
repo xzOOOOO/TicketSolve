@@ -31,6 +31,7 @@ import os
 import sys
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from state import SystemState, ApprovalStatus
 from agents import (
@@ -197,10 +198,14 @@ async def create_async_workflow(llm, checkpointer=None):
     workflow.add_edge("other_handler", END)
 
     # 编译工作流（带检查点）
+    # 配置序列化器以支持自定义类型（如 state.DiagnosisType、state.FixPlan）
+    serde = JsonPlusSerializer(allowed_msgpack_modules=[("state",)])
+
     if checkpointer:
+        checkpointer = checkpointer.with_serde(serde)
         app = workflow.compile(checkpointer=checkpointer)
     else:
-        memory = MemorySaver()
+        memory = MemorySaver(serde=serde)
         app = workflow.compile(checkpointer=memory)
 
     return app
