@@ -16,6 +16,10 @@ class Settings:
     LLM_MAX_CONCURRENT: int = int(os.getenv("LLM_MAX_CONCURRENT", "5"))
     LLM_RPM_LIMIT: int = int(os.getenv("LLM_RPM_LIMIT", "60"))
     
+    # LLM 重试配置
+    LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
+    LLM_RETRY_EXPONENTIAL_JITTER: bool = os.getenv("LLM_RETRY_EXPONENTIAL_JITTER", "true").lower() == "true"
+    
     # 数据库配置
     DB_USER: str = os.getenv("DB_USER", "postgres")
     DB_PASSWORD: str = os.getenv("DB_PASSWORD", "xxxxxx")
@@ -41,6 +45,15 @@ class Settings:
             "model": cls.LLM_MODEL,
             "base_url": cls.LLM_BASE_URL,
             "api_key": cls.LLM_API_KEY
+        }
+    
+    @classmethod
+    def get_retry_config(cls) -> dict:
+        """获取LLM重试配置字典（用于 Runnable.with_retry）"""
+        return {
+            "stop_after_attempt": cls.LLM_MAX_RETRIES + 1,
+            "wait_exponential_jitter": cls.LLM_RETRY_EXPONENTIAL_JITTER,
+            "retry_if_exception_type": (Exception,),
         }
 
 settings = Settings()

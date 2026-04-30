@@ -6,6 +6,7 @@ from state import SystemState
 from prompts import APP_PROMPT, APP_DIAGNOSIS_PROMPT
 from schemas import DiagnosisOutput
 from logger import logger
+from config import settings
 
 _VALID_AGENTS = {"db_agent", "net_agent", "app_agent"}
 
@@ -14,11 +15,6 @@ class AppAgent(BaseAgent):
     """应用诊断专家 Agent
 
     职责：使用应用相关工具诊断故障，返回结构化诊断结论。
-
-    Structured Output 改造说明：
-    - 原方案：LLM 输出 JSON 字符串 -> parse_json_content 解析 -> dict
-    - 新方案：self.llm.with_structured_output(DiagnosisOutput)
-             直接返回 Pydantic 对象，三个诊断 Agent 共用 DiagnosisOutput 模型
     """
     name = "app_agent"
     role = "应用诊断专家"
@@ -29,6 +25,7 @@ class AppAgent(BaseAgent):
         self.bus = communication_bus
         # 创建结构化 LLM，输出格式由 DiagnosisOutput 的 Pydantic schema 约束
         self._structured_llm = self.llm.with_structured_output(DiagnosisOutput)
+        self._diagnosis_chain = (APP_DIAGNOSIS_PROMPT | self._structured_llm).with_retry(**settings.get_retry_config())
 
     async def run(self, state: SystemState) -> dict:
         """执行应用诊断
@@ -57,8 +54,7 @@ class AppAgent(BaseAgent):
             )
 
             # 使用 Structured Output 生成诊断结论
-            # LLM 直接返回 DiagnosisOutput 对象，无需 JSON 解析
-            result = await (APP_DIAGNOSIS_PROMPT | self._structured_llm).ainvoke({
+            result = await self._diagnosis_chain.ainvoke({
                 "symptom": state.symptom,
                 "tool_calls": str(tool_calls_info),
                 "tool_results": str(tool_results),

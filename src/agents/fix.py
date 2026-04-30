@@ -4,6 +4,7 @@ from state import SystemState
 from prompts import FIX_PROMPT
 from schemas import FixPlanOutput
 from logger import logger
+from config import settings
 
 # 修复方案生成失败时的默认兜底数据
 _DEFAULT_FIX_PLAN = {
@@ -21,12 +22,6 @@ class FixAgent(BaseAgent):
     """修复方案生成专家 Agent
 
     职责：根据诊断结果生成可执行的修复方案。
-
-    Structured Output 改造说明：
-    - 原方案：LLM 输出 JSON 字符串 -> parse_json_content 解析 -> dict
-    - 新方案：self.llm.with_structured_output(FixPlanOutput)
-             直接返回嵌套的 Pydantic 对象（含 FixStepOutput 列表和 VerificationOutput）
-    - 注意：修复方案结构最复杂，手动解析最容易出错，Structured Output 收益最大
     """
     name = "fix_agent"
     role = "修复方案生成专家"
@@ -36,6 +31,7 @@ class FixAgent(BaseAgent):
         # FixPlanOutput 包含嵌套的 FixStepOutput 和 VerificationOutput
         # with_structured_output 会自动处理嵌套 schema
         self._structured_llm = self.llm.with_structured_output(FixPlanOutput)
+        self._chain = (FIX_PROMPT | self._structured_llm).with_retry(**settings.get_retry_config())
 
     async def run(self, state: SystemState) -> dict:
         """执行修复方案生成
@@ -65,7 +61,7 @@ class FixAgent(BaseAgent):
 
             # 使用 Structured Output 生成修复方案
             # LLM 直接返回 FixPlanOutput 对象，包含嵌套的 steps 和 verification
-            result = await (FIX_PROMPT | self._structured_llm).ainvoke({
+            result = await self._chain.ainvoke({
                 "diagnosis_type": diagnosis_type,
                 "diagnosis_result": str(diagnosis_result),
             })

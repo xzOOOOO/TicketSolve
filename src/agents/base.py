@@ -17,6 +17,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from utils import execute_tool_calls
 from logger import logger
+from config import settings
 
 
 class BaseAgent(ABC):
@@ -91,7 +92,7 @@ class BaseAgent(ABC):
             return all_tool_results, all_tool_calls_info
 
         messages = prompt_template.format_messages(symptom=symptom)
-        bound_llm = self.llm.bind_tools(self.tools)
+        bound_llm = self.llm.bind_tools(self.tools).with_retry(**settings.get_retry_config())
 
         for iteration in range(max_iterations):
             logger.info(

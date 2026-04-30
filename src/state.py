@@ -29,13 +29,7 @@ class ApprovalStatus(str, Enum):
 
 
 class FixStep(BaseModel):
-    """修复步骤
-
-    Structured Output 改造说明：
-    - 新增 expected_output、on_failure、rollback_command 三个 Optional 字段
-    - 原因：FixPlanOutput（LLM 结构化输出模型）中的步骤包含这些字段
-    - 设计为 Optional 以保持向后兼容：已有数据不会报错，新数据可以完整存储
-    """
+    """修复步骤"""
     step_id: int = Field(..., description="步骤编号")
     action: str = Field(..., description="修复动作描述")
     command: Optional[str] = Field(None, description="执行的命令")
@@ -67,14 +61,7 @@ class AgentMessage(BaseModel):
 
 
 class SystemState(BaseModel):
-    """
-    LangGraph工作流状态模型
-
-    Multi-Agent 改造:
-    - supervisor_decision: Supervisor 的派发决策（替代原 router 单路由）
-    - agent_messages: Agent 间通信消息（支持协作诊断）
-    - dispatched_agents: 当前被派发的 Agent 列表
-    """
+    """LangGraph工作流状态模型"""
 
     # ========== 输入信息 ==========
     ticket_id: str = Field(..., description="工单ID")

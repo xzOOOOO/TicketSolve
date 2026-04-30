@@ -14,6 +14,7 @@ from langgraph.types import interrupt
 from langgraph.errors import GraphInterrupt
 from database import AsyncSessionLocal, save_ticket
 from logger import logger
+from config import settings
 
 
 def create_dispatch_node(agent_runners: dict[str, Callable[[SystemState], Awaitable[dict]]]):
@@ -154,12 +155,6 @@ def create_aggregate_node(llm, communication_bus=None):
     - 只有一个 Agent 返回结果 → 直接采用
     - 多个 Agent 返回结果 → LLM 聚合推理，加权判断
 
-    Structured Output 改造说明：
-    - 原方案：LLM 输出 JSON 字符串 -> parse_json_content 解析 -> dict
-    - 新方案：llm.with_structured_output(AggregateOutput)
-             直接返回 Pydantic 对象
-    - 注意：aggregate 是函数式节点（非类），所以 structured_llm 在函数内部创建
-
     Args:
         llm: LLM 实例，用于聚合推理
         communication_bus: CommunicationBus 实例（可选），用于读取 Agent 间通信消息
@@ -217,7 +212,7 @@ def create_aggregate_node(llm, communication_bus=None):
             # 使用 Structured Output 进行聚合推理
             # 在函数内部创建 structured_llm（因为 aggregate 是函数式节点，无 __init__）
             structured_llm = llm.with_structured_output(AggregateOutput)
-            result = await (AGGREGATE_PROMPT | structured_llm).ainvoke({
+            result = await (AGGREGATE_PROMPT | structured_llm).with_retry(**settings.get_retry_config()).ainvoke({
                 "symptom": state.symptom,
                 "agent_results": results_str,
             })

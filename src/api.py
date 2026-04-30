@@ -11,8 +11,7 @@ from logger import logger
 import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
-from llm_rate_limiter import LLMRateLimiter, RateLimitedLLM
-from llm_retry import LLMRetryWrapper
+from llm_rate_limiter import LLMRateLimiter, RateLimitCallback
 app_state = {}
 
 @asynccontextmanager
@@ -31,21 +30,17 @@ async def lifespan(app: FastAPI):
     logger.info("LLM限流器初始化完成")
     
     llm_config = settings.get_llm_config()
-    llm = ChatOpenAI(**llm_config)
-
-    limited_llm = RateLimitedLLM(llm, rate_limiter)
-    retry_llm = LLMRetryWrapper(
-        limited_llm,
-        max_retries=3,
-        base_delay=1.0
+    llm = ChatOpenAI(
+        callbacks=[RateLimitCallback(rate_limiter)],
+        **llm_config
     )
-    logger.info("LLM实例创建完成（已集成限流+重试）")
+    logger.info("LLM实例创建完成（已集成限流回调）")
     
     checkpointer = MemorySaver()
-    workflow_app = await create_async_workflow(retry_llm, checkpointer=checkpointer)
+    workflow_app = await create_async_workflow(llm, checkpointer=checkpointer)
     logger.info("异步工作流创建完成（MCP工具已加载）")
     
-    app_state["llm"] = retry_llm
+    app_state["llm"] = llm
     app_state["workflow"] = workflow_app
     app_state["checkpointer"] = checkpointer
     app_state["rate_limiter"] = rate_limiter

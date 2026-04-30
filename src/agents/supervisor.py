@@ -4,18 +4,13 @@ from state import SystemState
 from prompts import SUPERVISOR_PROMPT
 from schemas import SupervisorDecisionOutput
 from logger import logger
+from config import settings
 
 
 class SupervisorAgent(BaseAgent):
     """智能调度主管 Agent
 
     职责：分析故障现象，决定派发哪些诊断 Agent 去调查。
-
-    Structured Output 改造说明：
-    - 原方案：LLM 输出 JSON 字符串 -> parse_json_content 手动解析 -> dict
-    - 新方案：self.llm.with_structured_output(SupervisorDecisionOutput)
-             LLM 通过 function calling 直接返回 Pydantic 对象
-    - 优势：类型安全、零解析失败、Prompt 更简洁
     """
     name = "supervisor"
     role = "智能调度主管"
@@ -26,6 +21,7 @@ class SupervisorAgent(BaseAgent):
         # with_structured_output 会将 Pydantic 模型转换为 JSON Schema
         # 通过 function calling 机制约束 LLM 的输出格式
         self._structured_llm = self.llm.with_structured_output(SupervisorDecisionOutput)
+        self._chain = (SUPERVISOR_PROMPT | self._structured_llm).with_retry(**settings.get_retry_config())
 
     async def run(self, state: SystemState) -> dict:
         """执行 Supervisor 调度决策
@@ -42,7 +38,7 @@ class SupervisorAgent(BaseAgent):
 
             # 使用 Structured Output 调用 LLM，直接返回 SupervisorDecisionOutput 对象
             # 无需再手动解析 JSON 字符串
-            result = await (SUPERVISOR_PROMPT | self._structured_llm).ainvoke(
+            result = await self._chain.ainvoke(
                 {"symptom": state.symptom}
             )
 
