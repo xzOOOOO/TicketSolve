@@ -3,7 +3,6 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from langchain_openai import ChatOpenAI
 from langgraph.types import Command
-from langgraph.checkpoint.memory import MemorySaver
 from database import init_db, get_db, AsyncSessionLocal
 from workflow import create_async_workflow
 from schemas import TicketCreateRequest, ApprovalRequest, TicketResponse, APIResponse
@@ -36,13 +35,11 @@ async def lifespan(app: FastAPI):
     )
     logger.info("LLM实例创建完成（已集成限流回调）")
     
-    checkpointer = MemorySaver()
-    workflow_app = await create_async_workflow(llm, checkpointer=checkpointer)
+    workflow_app = await create_async_workflow(llm, checkpointer=None)
     logger.info("异步工作流创建完成（MCP工具已加载）")
     
     app_state["llm"] = llm
     app_state["workflow"] = workflow_app
-    app_state["checkpointer"] = checkpointer
     app_state["rate_limiter"] = rate_limiter
     
     logger.info("工单系统准备就绪")
@@ -129,6 +126,57 @@ async def get_ticket(ticket_id: str, db: AsyncSession = Depends(get_db)):
         code=200,
         message="查询成功",
         data=TicketResponse.model_validate(ticket).model_dump()
+    )
+
+
+@app.get("/api/tickets/{ticket_id}/agent-flow", response_model=APIResponse)
+async def get_ticket_agent_flow(ticket_id: str, db: AsyncSession = Depends(get_db)):
+    from database import get_ticket_by_id, get_ticket_audit_logs
+
+    ticket = await get_ticket_by_id(db, ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"工单 {ticket_id} 不存在")
+
+    audit_logs = await get_ticket_audit_logs(db, ticket_id)
+
+    flow = []
+    for log in audit_logs:
+        step = {
+            "agent_name": log.agent_name,
+            "action_type": log.action_type,
+            "action_detail": log.action_detail,
+            "input_context": log.input_context,
+            "output_result": log.output_result,
+            "dispatch_round": log.dispatch_round,
+            "timestamp": log.created_at.isoformat() if log.created_at else None,
+        }
+        flow.append(step)
+
+    agent_summary = {}
+    for step in flow:
+        name = step["agent_name"]
+        if name not in agent_summary:
+            agent_summary[name] = {"actions": [], "dispatch_rounds": set()}
+        agent_summary[name]["actions"].append(step["action_type"])
+        if step["dispatch_round"]:
+            agent_summary[name]["dispatch_rounds"].add(step["dispatch_round"])
+
+    for name in agent_summary:
+        agent_summary[name]["dispatch_rounds"] = sorted(agent_summary[name]["dispatch_rounds"])
+
+    return APIResponse(
+        code=200,
+        message="查询成功",
+        data={
+            "ticket_id": ticket_id,
+            "diagnosis_type": ticket.diagnosis_type,
+            "urgency": ticket.urgency,
+            "status": ticket.status,
+            "dispatched_agents": list(agent_summary.keys()),
+            "agent_summary": agent_summary,
+            "flow_steps": flow,
+            "total_steps": len(flow),
+        },
     )
 
 @app.get("/health")

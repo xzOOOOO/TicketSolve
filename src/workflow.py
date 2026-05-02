@@ -201,11 +201,8 @@ async def create_async_workflow(llm, checkpointer=None):
     # 配置序列化器以支持自定义类型（如 state.DiagnosisType、state.FixPlan）
     serde = JsonPlusSerializer(allowed_msgpack_modules=[("state",)])
 
-    if checkpointer:
-        checkpointer = checkpointer.with_serde(serde)
-        app = workflow.compile(checkpointer=checkpointer)
-    else:
-        memory = MemorySaver(serde=serde)
-        app = workflow.compile(checkpointer=memory)
+    if checkpointer is None:
+        checkpointer = MemorySaver(serde=serde)
+    app = workflow.compile(checkpointer=checkpointer)
 
     return app

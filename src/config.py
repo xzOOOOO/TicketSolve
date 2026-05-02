@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from openai import APIError, APITimeoutError, APIConnectionError, RateLimitError
 
 load_dotenv()
 
@@ -53,7 +54,12 @@ class Settings:
         return {
             "stop_after_attempt": cls.LLM_MAX_RETRIES + 1,
             "wait_exponential_jitter": cls.LLM_RETRY_EXPONENTIAL_JITTER,
-            "retry_if_exception_type": (Exception,),
+            "retry_if_exception_type": (
+                APIConnectionError,
+                APITimeoutError,
+                RateLimitError,
+                APIError,
+            ),
         }
 
 settings = Settings()

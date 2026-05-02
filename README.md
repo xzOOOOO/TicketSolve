@@ -1,18 +1,24 @@
 # 智能工单分诊与自动化处置系统
 
-基于 LangGraph 多 Agent 协作的智能工单处理系统，实现工单自动分类、智能诊断、修复方案生成、人工审批和自动执行的全流程自动化。
+基于 LangGraph 多 Agent 协作的智能工单处理系统，实现工单自动分类、智能诊断、Agent 间动态协作、修复方案生成、人工审批和自动执行的全流程自动化。
 
 ## 项目简介
 
-本项目是一个企业级 AI 工单处理系统，利用大语言模型（LLM）和 LangGraph 工作流编排技术，构建了一个多 Agent 协作的智能诊断与修复平台。系统能够自动分析故障现象、分类诊断类型、调用专业工具进行深度诊断、生成可执行的修复方案，并通过人工审批机制确保操作安全性。
+本项目是一个企业级 AI 工单处理系统，利用大语言模型（LLM）和 LangGraph 工作流编排技术，构建了一个多 Agent 协作的智能诊断与修复平台。系统采用 Supervisor 调度架构，支持并行派发多个诊断 Agent，Agent 间通过通信总线动态协作，并使用 MCP（Model Context Protocol）标准化工具调用接口。
 
 ### 核心特性
 
-- **智能路由分类**：自动分析工单症状，精准分类为数据库/网络/应用/其他故障类型
-- **多 Agent 协作**：DB Agent、Net Agent、App Agent 三大专业诊断 Agent 协同工作
-- **工具调用诊断**：每个 Agent 配备专业工具集，实现深度故障诊断
-- **修复方案生成**：基于诊断结果自动生成包含步骤、命令、回滚方案的完整修复计划
+- **Supervisor 智能调度**：Supervisor Agent 分析故障症状，智能决定派发哪些诊断 Agent，支持并行派发
+- **多 Agent 并行诊断**：DB Agent、Net Agent、App Agent 三大专业诊断 Agent 并行执行，通过 asyncio.gather 实现高效并发
+- **Agent 间动态协作**：Agent 通过 CommunicationBus 通信总线发送 request_help 消息，DynamicCheck 节点自动追加派发，实现跨领域协作诊断
+- **ReAct 推理循环**：诊断 Agent 采用 Think → Act → Observe 循环，多轮调用工具直至信息充足
+- **MCP 工具集成**：基于 FastMCP 实现 MCP Server，通过 langchain-mcp-adapters 自动适配 LangChain 工具链，工具按类别分组注入各 Agent
+- **Structured Output**：所有 Agent 使用 LLM with_structured_output，通过 Pydantic schema 约束输出格式，替代手动 JSON 解析
+- **聚合推理**：Aggregate 节点综合多个 Agent 的诊断结果，加权判断给出最终诊断结论
+- **修复方案生成**：基于聚合诊断结果自动生成包含步骤、命令、回滚方案的完整修复计划
 - **人工审批机制**：利用 LangGraph 的 `interrupt` 特性实现安全的人工审批中断点
+- **LLM 限流器**：令牌桶算法控制并发请求数和 RPM，通过 LangChain 回调机制自动拦截
+- **审计日志**：全流程操作轨迹记录，支持工单处理流程可追溯
 - **异步架构**：全链路异步设计，支持高并发工单处理
 - **持久化存储**：PostgreSQL 数据库实现工单全生命周期管理
 - **RESTful API**：基于 FastAPI 提供标准化接口，支持 Swagger 文档
@@ -21,23 +27,26 @@
 
 ### 核心框架
 
-| 技术         | 版本      | 用途          |
-| ---------- | ------- | ----------- |
-| Python     | 3.10+   | 开发语言        |
-| LangGraph  | 1.1.6   | 工作流编排与状态机   |
-| LangChain  | 1.2.15  | LLM 抽象层与工具链 |
-| FastAPI    | 0.136.0 | 异步 Web 框架   |
-| SQLAlchemy | 2.0.49  | 异步 ORM      |
-| Pydantic   | 2.12.5  | 数据验证与序列化    |
+| 技术 | 用途 |
+| --- | --- |
+| Python 3.10+ | 开发语言 |
+| LangGraph | 工作流编排与状态机 |
+| LangChain | LLM 抽象层与工具链 |
+| langchain-openai | OpenAI 兼容接口集成 |
+| langchain-mcp-adapters | MCP 工具自动适配 LangChain |
+| FastMCP | MCP Server 实现 |
+| FastAPI | 异步 Web 框架 |
+| SQLAlchemy 2.0 | 异步 ORM |
+| Pydantic | 数据验证与 Structured Output |
 
 ### 基础设施
 
-| 技术            | 用途              |
-| ------------- | --------------- |
-| PostgreSQL    | 工单数据持久化         |
-| asyncpg       | PostgreSQL 异步驱动 |
-| Uvicorn       | ASGI 服务器        |
-| python-dotenv | 环境变量管理          |
+| 技术 | 用途 |
+| --- | --- |
+| PostgreSQL | 工单数据持久化 + 审计日志 |
+| asyncpg | PostgreSQL 异步驱动 |
+| Uvicorn | ASGI 服务器 |
+| python-dotenv | 环境变量管理 |
 
 ### AI 模型
 
@@ -49,70 +58,98 @@
 ### 整体架构图
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         FastAPI Server                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │ POST /tickets │  │ POST /tickets│  │ GET /tickets/{id}    │  │
-│  │   创建工单    │  │  /{id}/approve│  │   查询工单详情       │  │
-│  └──────┬───────┘  └──────┬───────┘  └──────────┬───────────┘  │
-│         │                 │                      │              │
-└─────────┼─────────────────┼──────────────────────┼──────────────┘
-          │                 │                      │
-          ▼                 ▼                      ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      LangGraph Workflow                         │
-│                                                                 │
-│  ┌─────────┐     ┌──────────────────────────┐                  │
-│  │  Router  │────▶│   条件路由                │                  │
-│  │  路由节点 │     │  diagnosis_type 判断      │                  │
-│  └─────────┘     └────────┬─────────────────┘                  │
-│                           │                                    │
-│              ┌────────────┼────────────┐                       │
-│              ▼            ▼            ▼                       │
-│        ┌──────────┐ ┌──────────┐ ┌──────────┐                 │
-│        │ DB Agent │ │ Net Agent│ │ App Agent│                 │
-│        │ 数据库诊断│ │ 网络诊断  │ │ 应用诊断  │                 │
-│        └────┬─────┘ └────┬─────┘ └────┬─────┘                 │
-│             │            │            │                        │
-│             └────────────┼────────────┘                        │
-│                          ▼                                    │
-│                   ┌──────────────┐                            │
-│                   │  Fix Agent   │                            │
-│                   │ 修复方案生成  │                            │
-│                   └──────┬───────┘                            │
-│                          │                                    │
-│                          ▼                                    │
-│                   ┌──────────────┐                            │
-│                   │ Human Approval│◀── interrupt() 中断点      │
-│                   │  人工审批节点  │                            │
-│                   └──────┬───────┘                            │
-│                          │                                    │
-│                    approved?                                  │
-│                   ┌──────┴──────┐                             │
-│                   ▼             ▼                             │
-│            ┌──────────┐    ┌────────┐                        │
-│            │ Execute  │    │  END   │                        │
-│            │ 执行修复  │    │  结束   │                        │
-│            └────┬─────┘    └────────┘                        │
-│                 │                                            │
-│                 ▼                                            │
-│            ┌──────────┐                                     │
-│            │   END    │                                     │
-│            └──────────┘                                     │
-└─────────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        PostgreSQL                               │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │  tickets 表                                               │  │
-│  │  - 工单基本信息 (ticket_id, symptom)                      │  │
-│  │  - 诊断结果 (diagnosis_type, diagnosis_result)            │  │
-│  │  - 修复方案 (fix_plan)                                    │  │
-│  │  - 审批信息 (approval_status, approver_comments)          │  │
-│  │  - 执行结果 (execution_result)                            │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                          FastAPI Server                              │
+│  ┌───────────────┐  ┌───────────────┐  ┌─────────────────────────┐  │
+│  │ POST /tickets  │  │ POST /tickets │  │ GET /tickets/{id}      │  │
+│  │   创建工单     │  │  /{id}/approve│  │   查询工单详情          │  │
+│  └───────┬───────┘  └───────┬───────┘  └───────────┬─────────────┘  │
+│  ┌───────┴───────┐  ┌───────┴───────┐  ┌───────────┴─────────────┐  │
+│  │ GET /tickets/ │  │ GET /rate-    │  │                           │  │
+│  │ {id}/agent-   │  │ limiter/stats │  │                           │  │
+│  │ flow          │  │               │  │                           │  │
+│  └───────┬───────┘  └───────┬───────┘  └───────────┬─────────────┘  │
+└──────────┼──────────────────┼───────────────────────┼────────────────┘
+           │                  │                       │
+           ▼                  ▼                       ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                       LangGraph Workflow                             │
+│                                                                      │
+│  ┌──────────────┐                                                   │
+│  │  Supervisor   │ 分析症状，决定派发哪些 Agent                       │
+│  │  调度主管     │                                                   │
+│  └──────┬───────┘                                                   │
+│         │                                                           │
+│    dispatched_agents?                                               │
+│    ┌────┴────┐                                                      │
+│    ▼         ▼                                                      │
+│  有Agent   无Agent                                                  │
+│    │         │                                                      │
+│    ▼         ▼                                                      │
+│ ┌──────────┐ ┌──────────────┐                                      │
+│ │ Dispatch │ │Other Handler │──────▶ END                            │
+│ │并行派发  │ │ 归档处理     │                                      │
+│ └────┬─────┘ └──────────────┘                                      │
+│      │                                                              │
+│      ▼                                                              │
+│ ┌──────────────┐    有协作请求    ┌──────────┐                      │
+│ │DynamicCheck  │──────────────▶ │ Dispatch │ (追加派发，循环)       │
+│ │ 动态检查     │──── 无请求 ────▶│          │                      │
+│ └──────┬───────┘                 └──────────┘                      │
+│        │ (无协作请求)                                              │
+│        ▼                                                           │
+│ ┌──────────────┐                                                   │
+│ │  Aggregate   │ 综合多个 Agent 诊断结果                            │
+│ │  聚合推理    │                                                   │
+│ └──────┬───────┘                                                   │
+│        ▼                                                           │
+│ ┌──────────────┐                                                   │
+│ │  Fix Agent   │ 生成修复方案                                      │
+│ └──────┬───────┘                                                   │
+│        ▼                                                           │
+│ ┌──────────────┐                                                   │
+│ │Human Approval│◀── interrupt() 中断点                             │
+│ └──────┬───────┘                                                   │
+│        │                                                           │
+│   approved?                                                        │
+│   ┌────┴────┐                                                      │
+│   ▼         ▼                                                      │
+│ Execute    END                                                      │
+│ 执行修复                                                             │
+│   │                                                                 │
+│   ▼                                                                 │
+│  END                                                                │
+└──────────────────────────────────────────────────────────────────────┘
+           │                  │
+           ▼                  ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                          MCP Server (FastMCP)                        │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐     │
+│  │ DB 诊断工具      │  │ Net 诊断工具     │  │ App 诊断工具    │     │
+│  │ check_db_conn   │  │ check_net_ping  │  │ check_app_proc  │     │
+│  │ check_db_slow   │  │ check_net_dns   │  │ check_app_port  │     │
+│  │ check_db_dead   │  │                 │  │                 │     │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘     │
+│  通过 langchain-mcp-adapters 自动转换为 LangChain BaseTool          │
+└──────────────────────────────────────────────────────────────────────┘
+           │
+           ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                          PostgreSQL                                  │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │  tickets 表                                                 │     │
+│  │  - 工单基本信息 (ticket_id, symptom)                        │     │
+│  │  - 诊断结果 (diagnosis_type, diagnosis_result)              │     │
+│  │  - 修复方案 (fix_plan)                                      │     │
+│  │  - 审批信息 (approval_status, approver_comments)            │     │
+│  │  - 执行结果 (execution_result)                              │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │  ticket_audit_logs 表                                       │     │
+│  │  - Agent 操作审计日志，记录每个 Agent 的完整操作轨迹          │     │
+│  │  - 支持按 ticket_id 查询，还原工单处理流程                   │     │
+│  └────────────────────────────────────────────────────────────┘     │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 工作流状态模型
@@ -122,20 +159,31 @@ SystemState
 ├── 输入信息
 │   ├── ticket_id: 工单ID
 │   └── symptom: 故障现象描述
-├── 路由决策
+├── Supervisor 决策
 │   ├── diagnosis_type: 诊断类型 (db/net/app/other)
-│   └── urgency: 紧急程度 (low/medium/high/critical)
+│   ├── urgency: 紧急程度 (low/medium/high/critical)
+│   ├── supervisor_decision: Supervisor 派发决策详情
+│   └── dispatched_agents: 被派发的 Agent 列表
 ├── Agent 诊断结果
 │   ├── db_agent_result: 数据库诊断结果
 │   ├── net_agent_result: 网络诊断结果
 │   └── app_agent_result: 应用诊断结果
+├── 聚合诊断
+│   └── aggregated_diagnosis: 综合诊断结果
+├── 动态调度
+│   ├── dispatch_round: 当前调度轮次
+│   └── max_dispatch_rounds: 最大动态调度轮次 (默认3)
+├── Agent 间通信
+│   └── agent_messages: Agent 间通信消息 (追加式)
 ├── 修复方案
 │   └── fix_plan: 包含步骤、命令、回滚方案
 ├── 人工审批
 │   ├── approval_status: 审批状态 (pending/approved/rejected)
 │   └── approver_comments: 审批意见
-└── 执行结果
-    └── execution_result: 执行步骤与结果
+├── 执行结果
+│   └── execution_result: 执行步骤与结果
+└── 审计日志
+    └── audit_logs: Agent 操作审计日志 (追加式)
 ```
 
 ## 快速开始
@@ -193,6 +241,10 @@ LLM_BASE_URL=your-url-here
 LLM_MAX_CONCURRENT=5  # 最大并发数
 LLM_RPM_LIMIT=60  # 每分钟请求数
 
+# LLM 重试配置
+LLM_MAX_RETRIES=3  # 最大重试次数
+LLM_RETRY_EXPONENTIAL_JITTER=true  # 指数退避抖动
+
 # 数据库配置
 DB_USER=postgres
 DB_PASSWORD=your-password
@@ -217,6 +269,13 @@ CREATE DATABASE tickets;
 ```
 
 #### 6. 启动服务
+
+```bash
+cd src
+python server.py
+```
+
+或使用 uvicorn 直接启动：
 
 ```bash
 cd src
@@ -326,7 +385,45 @@ uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 }
 ```
 
-### 4. 健康检查
+### 4. 查询工单 Agent 执行流程
+
+**接口**：`GET /api/tickets/{ticket_id}/agent-flow`
+
+返回工单的 Agent 执行流程，包含每个 Agent 的操作轨迹、调度轮次等信息，用于追溯和可视化。
+
+**响应示例**：
+
+```json
+{
+  "code": 200,
+  "message": "查询成功",
+  "data": {
+    "ticket_id": "TKT-001",
+    "diagnosis_type": "db",
+    "urgency": "high",
+    "status": "completed",
+    "dispatched_agents": ["supervisor", "db_agent", "fix_agent"],
+    "agent_summary": {
+      "supervisor": {
+        "actions": ["dispatch"],
+        "dispatch_rounds": [0]
+      },
+      "db_agent": {
+        "actions": ["tool_call", "diagnosis"],
+        "dispatch_rounds": [1]
+      },
+      "fix_agent": {
+        "actions": ["fix_plan"],
+        "dispatch_rounds": [1]
+      }
+    },
+    "flow_steps": [...],
+    "total_steps": 5
+  }
+}
+```
+
+### 5. 健康检查
 
 **接口**：`GET /health`
 
@@ -339,6 +436,25 @@ uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 }
 ```
 
+### 6. 查询限流器状态
+
+**接口**：`GET /api/rate-limiter/stats`
+
+**响应示例**：
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "max_concurrent": 5,
+    "rpm_limit": 60,
+    "current_rpm": 12,
+    "available_capacity": 48
+  }
+}
+```
+
 ## 核心模块说明
 
 ### 项目结构
@@ -346,19 +462,33 @@ uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 ```
 TicketSolve/
 ├── src/
-│   ├── api.py              # FastAPI 路由定义
-│   ├── config.py           # 配置管理
-│   ├── database.py         # 数据库模型与操作
-│   ├── logger.py           # 日志配置
-│   ├── main.py             # 命令行入口
-│   ├── nodes.py            # 工作流节点定义
-│   ├── schemas.py          # Pydantic 数据模型
-│   ├── server.py           # 服务器启动
-│   ├── state.py            # 工作流状态定义
-│   └── workflow.py         # 工作流编排
-├── .env.example            # 环境变量模板
+│   ├── agents/                # Agent 模块
+│   │   ├── __init__.py        # Agent 导出
+│   │   ├── base.py            # Agent 抽象基类（含 ReAct 循环）
+│   │   ├── supervisor.py      # Supervisor 调度主管 Agent
+│   │   ├── db.py              # 数据库诊断 Agent
+│   │   ├── net.py             # 网络诊断 Agent
+│   │   ├── app.py             # 应用诊断 Agent
+│   │   ├── fix.py             # 修复方案生成 Agent
+│   │   └── communication.py   # Agent 间通信总线
+│   ├── api.py                 # FastAPI 路由定义
+│   ├── config.py              # 配置管理（含重试配置）
+│   ├── database.py            # 数据库模型与操作（含审计日志）
+│   ├── llm_rate_limiter.py    # LLM 请求限流器
+│   ├── logger.py              # 日志配置
+│   ├── main.py                # 命令行入口
+│   ├── mcp_server.py          # MCP Server（FastMCP 诊断工具）
+│   ├── nodes.py               # 工作流节点（dispatch/aggregate/approval/executor）
+│   ├── prompts.py             # Prompt 模板定义
+│   ├── schemas.py             # Pydantic 数据模型 + Structured Output 模型
+│   ├── server.py              # 服务器启动入口
+│   ├── state.py               # 工作流状态定义
+│   ├── utils.py               # 工具调用执行辅助
+│   └── workflow.py            # 工作流编排（含 MCP Client 初始化）
+├── .env.example               # 环境变量模板
 ├── .gitignore
-└── requirements.txt        # Python 依赖
+├── LICENSE
+└── requirements.txt           # Python 依赖
 ```
 
 ### 模块详解
@@ -367,42 +497,85 @@ TicketSolve/
 
 使用 LangGraph 的 `StateGraph` 构建有向图工作流：
 
-- **条件路由**：根据 `diagnosis_type` 动态路由到对应 Agent
+- **Supervisor 调度**：替代原 Router，支持并行派发多个 Agent
+- **Dispatch 并行执行**：根据 dispatched_agents 列表，asyncio.gather 并行调用
+- **DynamicCheck 动态协作**：扫描 request_help 消息，自动追加派发（最多 3 轮）
+- **Aggregate 聚合推理**：综合多个 Agent 诊断结果，使用 Structured Output
 - **审批分支**：根据审批结果决定执行或终止
-- **检查点机制**：使用 `MemorySaver` 保存工作流状态，支持中断恢复
+- **MCP Client 初始化**：工作流创建时一次性初始化 MCP 连接，获取所有工具并按类别分组注入各 Agent
+- **检查点机制**：使用 `MemorySaver` + `JsonPlusSerializer` 保存工作流状态，支持中断恢复
 
-#### 2. 节点定义 (`nodes.py`)
+#### 2. Agent 架构 (`agents/`)
 
-| 节点             | 功能                 | 工具集                                                                |
-| -------------- | ------------------ | ------------------------------------------------------------------ |
-| Router         | 分析故障症状，分类诊断类型和紧急程度 | 无                                                                  |
-| DB Agent       | 数据库故障诊断            | check\_db\_connection, check\_db\_slow\_query, check\_db\_deadlock |
-| Net Agent      | 网络故障诊断             | check\_network\_ping, check\_network\_dns                          |
-| App Agent      | 应用故障诊断             | check\_app\_process, check\_app\_port                              |
-| Fix Agent      | 生成修复方案（含步骤、命令、回滚）  | 无                                                                  |
-| Human Approval | 人工审批中断点            | interrupt()                                                        |
-| Executor       | 执行修复方案并保存工单        | 无                                                                  |
+所有 Agent 继承自 `BaseAgent`，核心设计：
 
-#### 3. 状态管理 (`state.py`)
+| Agent | 职责 | 工具来源 | Structured Output |
+| --- | --- | --- | --- |
+| SupervisorAgent | 分析症状，决定派发哪些 Agent | 无 | SupervisorDecisionOutput |
+| DBAgent | 数据库故障诊断 | MCP: check_db_* | DiagnosisOutput |
+| NetAgent | 网络故障诊断 | MCP: check_network_* | DiagnosisOutput |
+| AppAgent | 应用故障诊断 | MCP: check_app_* | DiagnosisOutput |
+| FixAgent | 生成修复方案（含步骤、命令、回滚） | 无 | FixPlanOutput |
+
+**BaseAgent 核心能力**：
+- `react_loop()`：ReAct 推理循环（Think → Act → Observe），最多 3 轮工具调用
+- `run()`：抽象方法，子类实现具体诊断/修复逻辑
+
+**CommunicationBus 通信机制**：
+- `send()`：向指定 Agent 发送消息
+- `broadcast()`：广播消息给所有 Agent
+- `receive()`：获取发给指定 Agent 的消息（含广播）
+- 消息类型：diagnosis / question / request_help / disagreement
+
+#### 3. MCP Server (`mcp_server.py`)
+
+基于 FastMCP 实现的独立工具服务进程：
+
+| 工具类别 | 工具名 | 功能 |
+| --- | --- | --- |
+| 数据库 | check_db_connection | 检查数据库连接状态 |
+| 数据库 | check_db_slow_query | 检查慢查询 |
+| 数据库 | check_db_deadlock | 检查死锁 |
+| 网络 | check_network_ping | 检查网络连通性 |
+| 网络 | check_network_dns | 检查 DNS 解析 |
+| 应用 | check_app_process | 检查应用进程状态 |
+| 应用 | check_app_port | 检查应用端口状态 |
+
+通过 `langchain-mcp-adapters` 的 `MultiServerMCPClient` 以 stdio 模式启动 MCP Server 子进程，自动将 MCP 工具转换为 LangChain `BaseTool`，按工具名前缀分组注入各诊断 Agent。
+
+#### 4. 状态管理 (`state.py`)
 
 定义完整的工单状态模型，包含：
 
-- 输入信息、路由决策
-- 各 Agent 诊断结果
+- 输入信息、Supervisor 决策
+- 各 Agent 诊断结果、聚合诊断
+- 动态调度信息（dispatch_round、max_dispatch_rounds）
+- Agent 间通信消息（追加式 operator.add）
 - 修复方案、审批状态
-- 执行结果、消息记录
+- 执行结果、审计日志（追加式 operator.add）
 
-#### 4. 数据库 (`database.py`)
+#### 5. 数据库 (`database.py`)
 
 - 使用 SQLAlchemy 2.0 异步 ORM
-- Ticket 模型包含工单全生命周期字段
+- **Ticket 模型**：工单全生命周期字段
+- **TicketAuditLog 模型**：Agent 操作审计日志，支持按 ticket_id 查询完整处理流程
 - 支持工单创建、更新、查询操作
+- `save_ticket()` 同时保存审计日志到 ticket_audit_logs 表
 
-#### 5. API 接口 (`api.py`)
+#### 6. LLM 限流器 (`llm_rate_limiter.py`)
+
+- **LLMRateLimiter**：令牌桶算法，控制并发请求数和 RPM
+- **RateLimitCallback**：LangChain AsyncCallbackHandler，挂载到 ChatOpenAI 的 callbacks 参数上
+- 每次 LLM 调用前自动 acquire，调用后自动 release
+- with_structured_output / bind_tools 产生的内部调用也会被拦截
+
+#### 7. API 接口 (`api.py`)
 
 - FastAPI 异步路由
-- lifespan 管理应用生命周期
+- lifespan 管理应用生命周期（初始化数据库、LLM、限流器、工作流）
 - 统一响应格式（`APIResponse`）
+- 新增 `/api/tickets/{id}/agent-flow` 查询 Agent 执行流程
+- 新增 `/api/rate-limiter/stats` 查询限流器状态
 
 ## 使用示例
 
@@ -436,6 +609,12 @@ curl -X POST http://localhost:8000/api/tickets/TKT-001/approve \
 
 # 3. 查询工单
 curl http://localhost:8000/api/tickets/TKT-001
+
+# 4. 查询 Agent 执行流程
+curl http://localhost:8000/api/tickets/TKT-001/agent-flow
+
+# 5. 查询限流器状态
+curl http://localhost:8000/api/rate-limiter/stats
 ```
 
 使用 Python requests：
@@ -461,6 +640,10 @@ print(response.json())
 
 # 查询工单
 response = requests.get(f"{BASE_URL}/api/tickets/TKT-001")
+print(response.json())
+
+# 查询 Agent 执行流程
+response = requests.get(f"{BASE_URL}/api/tickets/TKT-001/agent-flow")
 print(response.json())
 ```
 
@@ -497,36 +680,37 @@ print(response.json())
 
 ## 扩展开发
 
-### 添加新的诊断工具
+### 添加新的 MCP 诊断工具
 
-在 `nodes.py` 中使用 `@tool` 装饰器定义新工具：
-
-```python
-@tool
-def check_custom_metric(metric_name: str) -> str:
-    """检查自定义指标"""
-    # 实现你的检测逻辑
-    return json.dumps({"metric": metric_name, "value": "xxx"})
-```
-
-然后在对应 Agent 的工具列表中添加：
+在 `mcp_server.py` 中使用 `@mcp.tool()` 装饰器定义新工具：
 
 ```python
-tools = [check_db_connection, check_db_slow_query, check_custom_metric]
+@mcp.tool()
+def check_db_replication_lag() -> str:
+    """检查数据库复制延迟"""
+    result = {
+        "replication_lag": "5s",
+        "status": "warning",
+        "possible_issue": "主从复制延迟过高"
+    }
+    return json.dumps(result, ensure_ascii=False)
 ```
 
-### 添加新的诊断类型
+工具会自动被 MCP Client 加载，按名称前缀分组注入对应 Agent。
 
-1. 在 `state.py` 的 `DiagnosisType` 枚举中添加新类型
-2. 创建新的 Agent 节点函数
-3. 在 `workflow.py` 中注册节点和路由规则
+### 添加新的诊断 Agent
+
+1. 在 `agents/` 目录创建新的 Agent 类，继承 `BaseAgent`
+2. 实现 `run()` 方法，使用 `react_loop()` 进行工具调用
+3. 在 `agents/__init__.py` 中导出
+4. 在 `workflow.py` 中注册 Agent runner 和工作流节点
 
 ### 替换为真实工具
 
-将 Mock 工具替换为实际执行逻辑：
+将 MCP Server 中的 Mock 工具替换为实际执行逻辑：
 
 ```python
-@tool
+@mcp.tool()
 def check_db_connection() -> str:
     """检查数据库连接状态"""
     import subprocess
@@ -537,30 +721,33 @@ def check_db_connection() -> str:
     })
 ```
 
+### 添加新的 Structured Output 模型
+
+在 `schemas.py` 中定义 Pydantic 模型，然后在 Agent 中使用 `llm.with_structured_output()` 约束输出格式。
+
 ## 性能优化建议
 
 1. **LLM 调用优化**
-   - 使用流式输出减少等待时间
-   - 添加缓存层避免重复调用
-   - 设置合理的超时和重试策略
+   - 已集成限流器（令牌桶算法），控制并发和 RPM
+   - 已使用 with_retry 配置重试策略（指数退避抖动）
+   - 可添加缓存层避免重复调用
 2. **数据库优化**
    - 为常用查询字段添加索引
    - 使用连接池管理数据库连接
-   - 定期归档历史工单
+   - 定期归档历史工单和审计日志
 3. **并发处理**
    - 使用 Redis 替代 MemorySaver 实现分布式状态保存
    - 多 worker 部署 Uvicorn
    - 添加消息队列处理异步任务
+4. **MCP 扩展**
+   - 支持 SSE 传输模式实现远程工具调用
+   - 添加更多专业诊断工具
 
 ## 常见问题
 
 ### Q: LLM 返回的 JSON 解析失败怎么办？
 
-系统内置了 `parse_json_content` 函数，支持多种 JSON 格式：
-
-- 标准 JSON
-- Markdown 代码块包裹的 JSON（`json ... `  ）
-- 包含额外文本的 JSON
+系统已全面使用 `with_structured_output` 替代手动 JSON 解析。LLM 通过 function calling 机制直接返回符合 Pydantic schema 的结构化数据，无需手动解析 JSON 字符串。同时内置了兜底处理，当 Structured Output 返回 None 时使用默认值。
 
 ### Q: 如何更换 LLM 提供商？
 
@@ -587,6 +774,26 @@ checkpointer = PostgresSaver(connection_string="postgresql://...")
 app = workflow.compile(checkpointer=checkpointer)
 ```
 
+### Q: Agent 间如何协作？
+
+Agent 通过 CommunicationBus 通信总线协作：
+1. 诊断 Agent 在诊断结论中指定 `need_collaboration` 列表
+2. CommunicationBus 向目标 Agent 发送 `request_help` 消息
+3. DynamicCheck 节点扫描消息，自动追加派发目标 Agent
+4. 被派发的 Agent 在下一轮 Dispatch 中执行，可接收前序 Agent 的消息
+
+### Q: 如何查看工单的完整处理流程？
+
+调用 `GET /api/tickets/{ticket_id}/agent-flow` 接口，返回包含所有 Agent 操作轨迹的审计日志，可还原完整的工单处理流程。
+
+### Q: LLM 请求频率过高怎么办？
+
+系统已内置 LLMRateLimiter 限流器，通过 `.env` 配置：
+- `LLM_MAX_CONCURRENT`：最大并发请求数
+- `LLM_RPM_LIMIT`：每分钟请求数上限
+
+限流器通过 LangChain 回调机制自动拦截所有 LLM 调用（包括 with_structured_output / bind_tools 产生的内部调用）。
+
 ## 开发计划
 
 - [ ] 实现真实诊断工具（SQL 查询、网络 ping 等）
@@ -597,6 +804,8 @@ app = workflow.compile(checkpointer=checkpointer)
 - [ ] Webhook 通知（邮件/钉钉/企业微信）
 - [ ] 前端管理界面
 - [ ] 工单统计分析面板
+- [ ] MCP Server 支持 SSE 传输模式
+- [ ] Redis 分布式检查点替代 MemorySaver
 
 ## 贡献指南
 
@@ -610,12 +819,4 @@ app = workflow.compile(checkpointer=checkpointer)
 
 ## 许可证
 
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
-
-## 联系方式
-
-- 项目 Issues：[GitHub Issues](https://github.com/xzOOOOO/TicketSolve.git)
-
-***
-
-**注意**：本系统目前使用的诊断工具为 Mock 实现，主要用于演示工作流和架构设计。生产环境需要替换为真实的诊断工具实现。
+[MIT License](LICENSE)
