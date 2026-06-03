@@ -33,6 +33,10 @@ class Settings:
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
     DEBUG: bool = os.getenv("DEBUG", "true").lower() == "true"
+
+    # 执行器配置
+    # mock: 只模拟命令执行；docker_lab: 在 SREBench Lite 靶场中执行白名单命令
+    EXECUTOR_MODE: str = os.getenv("EXECUTOR_MODE", "mock")
     
     @classmethod
     def get_database_url(cls) -> str:

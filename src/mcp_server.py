@@ -16,6 +16,18 @@ import asyncio
 import json
 from typing import Any
 from mcp.server.fastmcp import FastMCP
+from lab_diagnostics import (
+    check_app_health_result,
+    check_app_port_result,
+    check_app_process_result,
+    check_app_redis_connection_result,
+    check_db_connection_result,
+    check_db_deadlock_result,
+    check_db_slow_query_result,
+    check_network_dns_result,
+    check_network_http_route_result,
+    check_network_ping_result,
+)
 
 # 初始化 MCP Server
 mcp = FastMCP("diagnosis-server")
@@ -33,12 +45,7 @@ def check_db_connection() -> str:
     Returns:
         JSON字符串，包含连接状态、错误信息和可能的问题分析
     """
-    result = {
-        "status": "timeout",
-        "error": "Connection timed out after 30s",
-        "possible_issue": "数据库连接池耗尽或网络阻塞",
-        "timestamp": asyncio.get_event_loop().time()
-    }
+    result = check_db_connection_result()
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -50,17 +57,7 @@ def check_db_slow_query() -> str:
     Returns:
         JSON字符串，包含慢查询列表和可能的问题分析
     """
-    result = {
-        "slow_queries": [
-            {
-                "sql": "SELECT * FROM orders WHERE status='pending'",
-                "duration": "15s",
-                "rows_examined": 150000
-            }
-        ],
-        "possible_issue": "存在多条慢查询，疑似缺少索引",
-        "recommendation": "建议为 status 字段添加索引"
-    }
+    result = check_db_slow_query_result()
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -72,11 +69,7 @@ def check_db_deadlock() -> str:
     Returns:
         JSON字符串，包含死锁检测结果
     """
-    result = {
-        "deadlocks": [],
-        "possible_issue": "未检测到死锁",
-        "last_check": "2024-01-01T00:00:00Z"
-    }
+    result = check_db_deadlock_result()
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -95,14 +88,7 @@ def check_network_ping(host: str) -> str:
     Returns:
         JSON字符串，包含ping测试结果
     """
-    result = {
-        "target": host,
-        "status": "unreachable",
-        "latency": None,
-        "packet_loss": "100%",
-        "possible_issue": "网络不通或目标主机不可达",
-        "suggestion": "检查防火墙规则和网络配置"
-    }
+    result = check_network_ping_result(host)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -117,13 +103,22 @@ def check_network_dns(domain: str) -> str:
     Returns:
         JSON字符串，包含DNS解析结果
     """
-    result = {
-        "domain": domain,
-        "resolved_ip": "10.0.0.1",
-        "dns_status": "ok",
-        "possible_issue": "DNS解析正常",
-        "ttl": 300
-    }
+    result = check_network_dns_result(domain)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def check_network_http_route(url: str = "http://localhost:18080/health") -> str:
+    """
+    检查 Nginx 到应用的 HTTP 路由状态
+
+    Args:
+        url: 入口 URL，默认检查 SREBench Lite 的 nginx health 路由
+
+    Returns:
+        JSON字符串，包含 nginx 入口与直连 app 的对比结果
+    """
+    result = check_network_http_route_result(url)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -142,15 +137,7 @@ def check_app_process(process_name: str) -> str:
     Returns:
         JSON字符串，包含进程运行状态、资源占用等
     """
-    result = {
-        "process": process_name,
-        "status": "running",
-        "pid": 12345,
-        "cpu": "85%",
-        "memory": "92%",
-        "possible_issue": "进程CPU和内存使用率过高",
-        "recommendation": "建议扩容或优化代码"
-    }
+    result = check_app_process_result(process_name)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -165,13 +152,34 @@ def check_app_port(port: int) -> str:
     Returns:
         JSON字符串，包含端口监听状态和连接数
     """
-    result = {
-        "port": port,
-        "status": "listening",
-        "connection_count": 150,
-        "possible_issue": "连接数正常",
-        "max_connections": 1024
-    }
+    result = check_app_port_result(port)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def check_app_health(url: str = "http://localhost:18081/health") -> str:
+    """
+    检查应用健康接口
+
+    Args:
+        url: 应用健康检查 URL，默认直连 SREBench Lite app
+
+    Returns:
+        JSON字符串，包含应用容器状态和 HTTP 健康检查结果
+    """
+    result = check_app_health_result(url)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def check_app_redis_connection() -> str:
+    """
+    检查应用依赖的 Redis 连接
+
+    Returns:
+        JSON字符串，包含 Redis 容器、端口和业务 cache endpoint 检查结果
+    """
+    result = check_app_redis_connection_result()
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -197,8 +205,11 @@ def get_system_info() -> str:
             "check_db_deadlock",
             "check_network_ping",
             "check_network_dns",
+            "check_network_http_route",
             "check_app_process",
-            "check_app_port"
+            "check_app_port",
+            "check_app_health",
+            "check_app_redis_connection"
         ],
         "tech_stack": {
             "framework": "FastMCP",

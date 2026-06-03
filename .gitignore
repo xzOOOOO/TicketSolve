@@ -47,7 +47,11 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+eval/reports/
 
 # 系统文件
 .DS_Store
 Thumbs.db
+
+lab/
+.pip_packages

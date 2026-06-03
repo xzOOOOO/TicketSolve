@@ -1,0 +1,25 @@
+cases:
+  - id: DB_CONN_FAIL
+    expected_domain: db
+    ticket: "Database-backed APIs return 503 and health check reports database unavailable."
+    recovery_check: "http://localhost:18080/health"
+
+  - id: APP_PROCESS_DOWN
+    expected_domain: app
+    ticket: "The main service is unreachable through nginx and direct app health checks fail."
+    recovery_check: "http://localhost:18080/health"
+
+  - id: REDIS_DOWN
+    expected_domain: app
+    ticket: "Cache endpoint returns 503 and users report session/cache failures."
+    recovery_check: "http://localhost:18080/cache/ping"
+
+  - id: NGINX_BAD_ROUTE
+    expected_domain: net
+    ticket: "The app is healthy directly, but requests through nginx return a bad gateway."
+    recovery_check: "http://localhost:18080/health"
+
+  - id: DB_SLOW_QUERY
+    expected_domain: db
+    ticket: "The pending orders endpoint is much slower than usual, especially under database load."
+    recovery_check: "http://localhost:18080/orders/pending"

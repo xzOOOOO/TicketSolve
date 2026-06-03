@@ -95,8 +95,15 @@ class SystemState(BaseModel):
     approval_status: ApprovalStatus = Field(ApprovalStatus.PENDING, description="审批状态")
     approver_comments: Optional[str] = Field(None, description="审批意见")
 
-    # ========== 执行结果 ==========
+    # ========== 安全护栏 ==========
+    guardrail_result: Optional[Dict[str, Any]] = Field(None, description="安全护栏检查结果")
+
+    # ========== 闭环执行器 ==========
     execution_result: Optional[Dict[str, Any]] = Field(None, description="执行结果")
+    execution_trace: Annotated[List[Dict[str, Any]], operator.add] = Field(
+        default_factory=list,
+        description="闭环执行器轨迹：每一步的执行结果、LLM决策、重试/回滚记录"
+    )
 
     # ========== 审计日志（用于可追溯性） ==========
     audit_logs: Annotated[List[Dict[str, Any]], operator.add] = Field(

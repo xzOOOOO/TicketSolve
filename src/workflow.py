@@ -4,7 +4,9 @@ LangGraph 工作流定义 - Multi-Agent 架构
 工作流结构:
     Supervisor → Dispatch(并行派发) → DynamicCheck → [有协作请求?]
                                                     ├─ 是 → Dispatch(追加派发) → DynamicCheck → ...
-                                                    └─ 否 → Aggregate(聚合推理) → Fix → Human Approval → Executor
+                                                    └─ 否 → Aggregate(聚合推理) → Fix → Guardrail → [通过?]
+                                                                                              ├─ 是 → Human Approval → Executor(闭环)
+                                                                                              └─ 否 → END(方案被拦截)
                     ↓ (other/无Agent)
                 Other Handler → END
 
@@ -15,6 +17,8 @@ LangGraph 工作流定义 - Multi-Agent 架构
 - Aggregate 节点综合多个 Agent 的诊断结果
 - Fix Agent 优先使用聚合诊断结果
 - Agent 间通过 CommunicationBus 通信
+- Guardrail 确定性安全护栏：用代码规则约束 LLM 输出边界
+- Executor 闭环执行器：Observe → Decide → Act 循环
 
 MCP集成说明:
 - 使用 langchain-mcp-adapters 的 MultiServerMCPClient
@@ -46,6 +50,7 @@ from nodes import (
     create_dispatch_node,
     create_dynamic_check_node,
     create_aggregate_node,
+    create_guardrail_node,
     create_human_approval_node,
     create_executor_node,
     create_other_handler_node,
@@ -71,6 +76,13 @@ def route_by_approval(state: SystemState) -> str:
     """审批后路由：批准则执行，否则结束"""
     if state.approval_status == ApprovalStatus.APPROVED:
         return "execute"
+    return END
+
+
+def route_after_guardrail(state: SystemState) -> str:
+    """护栏后路由：通过则进入人工审批，未通过则结束（方案被拦截）"""
+    if state.guardrail_result and state.guardrail_result.get("passed", False):
+        return "human_approval"
     return END
 
 
@@ -145,8 +157,9 @@ async def create_async_workflow(llm, checkpointer=None):
     dispatch_node = create_dispatch_node(agent_runners)
     dynamic_check_node = create_dynamic_check_node()
     aggregate_node = create_aggregate_node(llm, communication_bus)
+    guardrail_node = create_guardrail_node()
     human_approval_node = create_human_approval_node()
-    executor_node = create_executor_node()
+    executor_node = create_executor_node(llm)  # 闭环执行器，传入 LLM 用于错误分析
     other_handler_node = create_other_handler_node()
 
     # 构建状态图
@@ -158,6 +171,7 @@ async def create_async_workflow(llm, checkpointer=None):
     workflow.add_node("dynamic_check", dynamic_check_node)
     workflow.add_node("aggregate", aggregate_node)
     workflow.add_node("fix_agent", fix_agent.run)
+    workflow.add_node("guardrail", guardrail_node)
     workflow.add_node("human_approval", human_approval_node)
     workflow.add_node("execute", executor_node)
     workflow.add_node("other_handler", other_handler_node)
@@ -182,9 +196,16 @@ async def create_async_workflow(llm, checkpointer=None):
         {"dispatch": "dispatch", "aggregate": "aggregate"},
     )
 
-    # Aggregate → Fix → Human Approval（固定流程）
+    # Aggregate → Fix → Guardrail（确定性安全检查）
     workflow.add_edge("aggregate", "fix_agent")
-    workflow.add_edge("fix_agent", "human_approval")
+    workflow.add_edge("fix_agent", "guardrail")
+
+    # Guardrail → 通过则进入人工审批，未通过则结束（方案被拦截）
+    workflow.add_conditional_edges(
+        "guardrail",
+        route_after_guardrail,
+        {"human_approval": "human_approval", END: END},
+    )
 
     # 审批后路由：批准则执行，否则结束
     workflow.add_conditional_edges(
@@ -199,7 +220,15 @@ async def create_async_workflow(llm, checkpointer=None):
 
     # 编译工作流（带检查点）
     # 配置序列化器以支持自定义类型（如 state.DiagnosisType、state.FixPlan）
-    serde = JsonPlusSerializer(allowed_msgpack_modules=[("state",)])
+    serde = JsonPlusSerializer(
+        allowed_msgpack_modules=[
+            ("state", "FixPlan"),
+            ("state", "FixStep"),
+            ("state", "ApprovalStatus"),
+            ("state", "DiagnosisType"),
+            ("state", "Urgency"),
+        ]
+    )
 
     if checkpointer is None:
         checkpointer = MemorySaver(serde=serde)

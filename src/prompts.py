@@ -14,7 +14,7 @@ DB_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 DB_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """你是一位资深数据库工程师。
+    ("system", """你是一位资深数据库工程师。请基于收集到的信息给出诊断结论，输出 JSON 格式结果。
 
 故障现象：{symptom}
 
@@ -33,7 +33,7 @@ DB_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
 - diagnosis: 具体诊断结论
 - possible_causes: 可能的原因列表
 - confidence: 诊断置信度 0-1
-- need_collaboration: 可选的协作 Agent（仅限以下名称，不要编造其他 Agent）：db_agent（数据库诊断专家）、net_agent（网络诊断专家）、app_agent（应用诊断专家）。如不需要协作则为空列表。""")
+- need_collaboration: 可选的协作 Agent（仅限以下名称，不要编造其他 Agent）：db_agent（数据库诊断专家）、net_agent（网络诊断专家）、app_agent（应用诊断专家）。如不需要协作则为空列表。"""),
 ])
 
 NET_PROMPT = ChatPromptTemplate.from_messages([
@@ -42,13 +42,14 @@ NET_PROMPT = ChatPromptTemplate.from_messages([
 你的工具：
 - check_network_ping: 检查网络连通性（参数：host）
 - check_network_dns: 检查DNS解析（参数：domain）
+- check_network_http_route: 对比 nginx 入口和直连 app 的 HTTP 路由状态（参数：url，可选）
 
 除非现象明确，否则你必须先调用工具收集信息，不能仅凭故障现象直接猜测结论。请根据故障现象，选择合适的工具进行分析。"""),
     ("human", "故障现象：{symptom}")
 ])
 
 NET_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """你是一位资深网络架构师。
+    ("system", """你是一位资深网络架构师。请基于收集到的信息给出诊断结论，输出 JSON 格式结果。
 
 故障现象：{symptom}
 
@@ -67,7 +68,7 @@ NET_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
 - diagnosis: 具体诊断结论
 - possible_causes: 可能的原因列表
 - confidence: 诊断置信度 0-1
-- need_collaboration: 可选的协作 Agent（仅限以下名称，不要编造其他 Agent）：db_agent（数据库诊断专家）、net_agent（网络诊断专家）、app_agent（应用诊断专家）。如不需要协作则为空列表。""")
+- need_collaboration: 可选的协作 Agent（仅限以下名称，不要编造其他 Agent）：db_agent（数据库诊断专家）、net_agent（网络诊断专家）、app_agent（应用诊断专家）。如不需要协作则为空列表。"""),
 ])
 
 APP_PROMPT = ChatPromptTemplate.from_messages([
@@ -76,13 +77,15 @@ APP_PROMPT = ChatPromptTemplate.from_messages([
 你的工具：
 - check_app_process: 检查应用进程（参数：process_name）
 - check_app_port: 检查应用端口（参数：port）
+- check_app_health: 检查应用健康接口（参数：url，可选）
+- check_app_redis_connection: 检查应用依赖的 Redis 连接
 
 除非现象明确，否则你必须先调用工具收集信息，不能仅凭故障现象直接猜测结论。请根据故障现象，选择合适的工具进行分析。"""),
     ("human", "故障现象：{symptom}")
 ])
 
 APP_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """你是一位资深应用架构师。
+    ("system", """你是一位资深应用架构师。请基于收集到的信息给出诊断结论，输出 JSON 格式结果。
 
 故障现象：{symptom}
 
@@ -101,11 +104,11 @@ APP_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
 - diagnosis: 具体诊断结论
 - possible_causes: 可能的原因列表
 - confidence: 诊断置信度 0-1
-- need_collaboration: 可选的协作 Agent（仅限以下名称，不要编造其他 Agent）：db_agent（数据库诊断专家）、net_agent（网络诊断专家）、app_agent（应用诊断专家）。如不需要协作则为空列表。""")
+- need_collaboration: 可选的协作 Agent（仅限以下名称，不要编造其他 Agent）：db_agent（数据库诊断专家）、net_agent（网络诊断专家）、app_agent（应用诊断专家）。如不需要协作则为空列表。"""),
 ])
 
 FIX_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """你是一位资深自动化运维专家，擅长制定可执行的修复方案。
+    ("system", """你是一位资深自动化运维专家，擅长制定可执行的修复方案。请输出 JSON 格式的修复方案。
 
 背景信息：
 - 专长：故障修复、脚本编写、运维自动化
@@ -114,19 +117,37 @@ FIX_PROMPT = ChatPromptTemplate.from_messages([
 
 请生成一个完整的、可执行的修复方案。
 
+如果诊断结果来自 SREBench Lite 靶场，修复步骤里的 command 必须优先使用以下白名单命令，不要生成裸 shell、rm、sed、systemctl、iptables 等命令：
+- python lab/chaos.py recover DB_CONN_FAIL
+- python lab/chaos.py recover APP_PROCESS_DOWN
+- python lab/chaos.py recover REDIS_DOWN
+- python lab/chaos.py recover NGINX_BAD_ROUTE
+- python lab/chaos.py recover DB_SLOW_QUERY
+- docker start srebench-postgres
+- docker start srebench-app
+- docker start srebench-redis
+- docker restart srebench-nginx
+- docker exec srebench-postgres psql -U labuser -d labdb -c "create index if not exists idx_orders_status_created_at on orders (status, created_at desc);"
+
+验证命令可以使用：
+- curl http://localhost:18080/health
+- curl http://localhost:18081/health
+- curl http://localhost:18080/cache/ping
+- curl http://localhost:18080/orders/pending
+
 字段说明：
 - plan_id: 方案ID，如 PLAN-001
 - description: 方案简述
 - risk_level: 风险等级(low/medium/high)
 - prerequisites: 前置条件列表
-- steps: 修复步骤列表，每个步骤包含 step_id(编号)、action(动作描述)、command(执行命令)、risk_level(风险等级)、expected_output(预期输出)、on_failure(失败处理)、rollback_command(回滚命令)
+- steps: 修复步骤列表，每个步骤包含 step_id(步骤编号，必须是纯数字如 1/2/3，不要带前缀如 STEP-01)、action(动作描述)、command(执行命令)、risk_level(风险等级)、expected_output(预期输出)、on_failure(失败处理)、rollback_command(回滚命令)
 - verification: 验证方法，包含 commands(验证命令列表) 和 expected_result(预期结果)
 - estimated_time: 预计执行时间"""),
     ("human", "诊断类型：{diagnosis_type}\n\n诊断结果：{diagnosis_result}\n\n请生成修复方案。")
 ])
 
 SUPERVISOR_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """你是一个智能工单调度主管（Supervisor）。你的职责是分析故障现象，决定派发哪些诊断Agent去调查。
+    ("system", """你是一个智能工单调度主管（Supervisor）。你的职责是分析故障现象，决定派发哪些诊断Agent去调查。请输出 JSON 格式的调度决策。
 
 可用Agent：
 - db_agent: 数据库诊断专家，擅长连接超时、慢查询、死锁等问题
@@ -156,7 +177,7 @@ SUPERVISOR_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 AGGREGATE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """你是一个智能诊断聚合器。你的职责是综合多个诊断Agent的结果，给出最终诊断结论。
+    ("system", """你是一个智能诊断聚合器。你的职责是综合多个诊断Agent的结果，给出最终诊断结论。请输出 JSON 格式的聚合结果。
 
 聚合原则：
 1. 如果只有一个Agent返回结果，直接采用其结论
@@ -173,4 +194,35 @@ AGGREGATE_PROMPT = ChatPromptTemplate.from_messages([
 - contributing_agents: 贡献诊断的Agent列表
 - reasoning: 聚合推理过程"""),
     ("human", "故障现象：{symptom}\n\n各Agent诊断结果：\n{agent_results}")
+])
+
+ERROR_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """你是一个运维执行错误分析专家。你的职责是分析命令执行失败的原因，决定下一步动作。请输出 JSON 格式的决策结果。
+
+当前执行上下文：
+- 步骤编号: {step_id}
+- 步骤描述: {action}
+- 执行命令: {command}
+- 风险等级: {risk_level}
+- 当前重试次数: {attempt}/{max_retries}
+
+执行结果：
+- 退出码: {exit_code}
+- 标准输出: {stdout}
+- 标准错误: {stderr}
+
+请基于以上真实的执行结果，分析失败原因并决定下一步动作。
+
+决策原则：
+1. retry: 临时性错误（网络超时、资源暂时不可用）→ 可以重试
+2. adjust: 命令本身有问题（参数错误、路径不对）→ 调整命令后重试，必须给出调整后的完整命令
+3. rollback: 严重错误（权限不足、数据损坏）→ 不应重试，执行回滚
+4. skip: 非关键步骤失败，不影响整体修复 → 跳过继续
+
+字段说明：
+- action: 决策动作，必须是 retry/adjust/rollback/skip 之一
+- adjusted_command: 调整后的命令（仅 action=adjust 时需要填写，其他动作留空）
+- reasoning: 决策理由，必须引用具体的错误信息
+- estimated_fix_probability: 预估修复成功概率 0-1"""),
+    ("human", "请分析以上执行错误并给出决策。")
 ])

@@ -125,3 +125,47 @@ class AggregateOutput(BaseModel):
     confidence: float = Field(description="诊断置信度，范围 0-1")
     contributing_agents: List[str] = Field(description="贡献诊断的Agent列表")
     reasoning: str = Field(description="聚合推理过程")
+
+
+# ============================================================
+# 安全护栏 & 闭环执行器 模型
+# ============================================================
+
+
+class GuardrailViolation(BaseModel):
+    """单条护栏违规记录"""
+    rule_id: str = Field(description="违规规则ID，如 DANGEROUS_CMD_001")
+    severity: str = Field(description="严重程度: critical/warning")
+    step_id: Optional[int] = Field(None, description="违规步骤编号")
+    message: str = Field(description="违规描述（人可读）")
+    detail: str = Field("", description="违规详情（具体匹配到的内容）")
+
+
+class GuardrailResult(BaseModel):
+    """护栏检查结果"""
+    passed: bool = Field(description="是否通过检查")
+    violations: List[GuardrailViolation] = Field(default_factory=list, description="违规列表")
+    checked_at: str = Field("", description="检查时间戳")
+
+
+class CommandExecutionResult(BaseModel):
+    """单步命令执行结果（Mock 或真实）"""
+    step_id: int = Field(description="步骤编号")
+    command: str = Field(description="执行的命令")
+    exit_code: int = Field(description="退出码: 0=成功, 非0=失败")
+    stdout: str = Field("", description="标准输出")
+    stderr: str = Field("", description="标准错误")
+    success: bool = Field(description="是否成功")
+    execution_time_ms: int = Field(0, description="执行耗时(毫秒)")
+
+
+class ErrorAnalysisOutput(BaseModel):
+    """LLM 错误分析输出
+
+    执行失败时，LLM 分析错误信息后决定下一步动作。
+    这是闭环执行器的核心决策点——由真实错误驱动，不是 LLM 凭空决定。
+    """
+    action: str = Field(description="决策动作: retry(重试当前步骤) / adjust(调整命令后重试) / rollback(执行回滚) / skip(跳过继续)")
+    adjusted_command: Optional[str] = Field(None, description="调整后的命令（action=adjust 时必填）")
+    reasoning: str = Field(description="决策理由")
+    estimated_fix_probability: float = Field(0.0, description="预估修复成功概率 0-1")

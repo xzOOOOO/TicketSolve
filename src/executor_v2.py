@@ -1,0 +1,929 @@
+"""
+闭环执行器（Closed-loop Executor）
+
+核心架构：Observe → Decide → Act 循环
+不是一次性跑完所有步骤，而是每一步都观察真实结果，根据结果决策下一步。
+
+执行流程：
+    执行步骤1 → 观察真实输出(stdout/stderr/exit_code)
+             → [成功] → 执行步骤2
+             → [失败] → LLM分析错误 → [可重试] → 重试/调整命令
+                                      → [不可重试] → 执行回滚 → 报告失败
+
+关键区别（vs 原 Mock 执行器）：
+1. 每一步都观察真实结果（命令的 stdout/stderr/exit code）
+2. 失败时 LLM 介入分析真实错误信息，决定重试/调整/回滚
+3. 状态转换由真实结果驱动，不是 LLM 凭空决定
+4. 完整的执行轨迹记录，可追溯每一步的决策过程
+
+Mock 说明：
+- MockCommandRunner 模拟命令执行，返回预设的 stdout/stderr/exit_code
+- 架构是闭环的，替换为真实 CommandRunner（如 subprocess）即可用于生产
+- 面试重点讲架构设计，不是 Mock 本身
+"""
+
+import asyncio
+import random
+import shlex
+import subprocess
+import sys
+import time
+from typing import Optional
+from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from schemas import CommandExecutionResult, ErrorAnalysisOutput
+from logger import logger
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LAB_CHAOS_SCRIPT = PROJECT_ROOT / "lab" / "chaos.py"
+
+
+def _is_effective_command(command: Optional[str]) -> bool:
+    """判断命令是否真的需要执行，避免把 N/A 当成回滚命令。"""
+    if command is None:
+        return False
+    normalized = command.strip().lower()
+    return normalized not in {"", "n/a", "na", "none", "null", "无", "无需回滚", "不需要"}
+
+
+# ============================================================
+# 命令执行器抽象接口
+# ============================================================
+
+class CommandRunner(ABC):
+    """
+    命令执行器抽象接口
+
+    设计意图：将"如何执行命令"与"执行流程编排"解耦。
+    MockCommandRunner 用于开发测试，SubprocessCommandRunner 用于生产。
+    执行器只关心"执行一条命令，返回结果"，不关心业务逻辑。
+    """
+
+    @abstractmethod
+    async def run(self, command: str, step_id: int, timeout: int = 30) -> CommandExecutionResult:
+        """
+        执行单条命令并返回结果
+
+        Args:
+            command: 要执行的命令字符串
+            step_id: 步骤编号（用于日志标识）
+            timeout: 超时时间（秒）
+
+        Returns:
+            CommandExecutionResult: 包含 exit_code, stdout, stderr, success 等
+        """
+        ...
+
+
+# ============================================================
+# Mock 命令执行器
+# ============================================================
+
+# 预设的 Mock 响应库：根据命令关键词匹配模拟输出
+# 这样 Mock 不是简单的"全部成功"，而是能模拟各种真实场景
+MOCK_RESPONSES = {
+    # 数据库相关命令
+    r"\bpg_dump\b": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout="pg_dump: dumping database 'production'...\npg_dump: done",
+        stderr="", success=True, execution_time_ms=2500,
+    ),
+    r"\bpsql\b.*\bALTER\b": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout="ALTER TABLE\nALTER INDEX",
+        stderr="", success=True, execution_time_ms=150,
+    ),
+    r"\bsystemctl\s+stop\b": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout="Job stopped successfully",
+        stderr="", success=True, execution_time_ms=800,
+    ),
+    r"\bsystemctl\s+start\b": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout="Job started successfully",
+        stderr="", success=True, execution_time_ms=1200,
+    ),
+    r"\bsystemctl\s+restart\b": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout="Job restarted successfully",
+        stderr="", success=True, execution_time_ms=1500,
+    ),
+    r"\bsed\b": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout="Configuration updated",
+        stderr="", success=True, execution_time_ms=50,
+    ),
+    r"\bcp\b": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout="copied successfully",
+        stderr="", success=True, execution_time_ms=100,
+    ),
+    r"\bmv\b": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout="moved successfully",
+        stderr="", success=True, execution_time_ms=80,
+    ),
+    # 验证命令
+    r"\bping\b": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout="64 bytes from 10.0.0.1: icmp_seq=1 ttl=64 time=0.123 ms\n--- ping statistics ---\n1 packets transmitted, 1 received, 0% packet loss",
+        stderr="", success=True, execution_time_ms=1000,
+    ),
+    r"\bcurl\b.*health": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout='{"status": "healthy", "uptime": 86400}',
+        stderr="", success=True, execution_time_ms=200,
+    ),
+    # 回滚命令
+    r"\brestore\b|\brecover\b|\brollback\b": CommandExecutionResult(
+        step_id=0, command="", exit_code=0,
+        stdout="Rollback completed successfully",
+        stderr="", success=True, execution_time_ms=3000,
+    ),
+}
+
+# 默认成功响应（命令不匹配任何预设模式时使用）
+DEFAULT_SUCCESS_RESPONSE = CommandExecutionResult(
+    step_id=0, command="", exit_code=0,
+    stdout="Command executed successfully",
+    stderr="", success=True, execution_time_ms=200,
+)
+
+# 模拟失败场景的响应（随机触发，概率约 15%）
+# 用于测试闭环执行器的错误处理能力
+MOCK_FAILURE_RESPONSES = [
+    CommandExecutionResult(
+        step_id=0, command="", exit_code=1,
+        stdout="",
+        stderr="Error: Connection refused. Service not responding on port 5432.",
+        success=False, execution_time_ms=5000,
+    ),
+    CommandExecutionResult(
+        step_id=0, command="", exit_code=2,
+        stdout="",
+        stderr="Permission denied: insufficient privileges to execute this command.",
+        success=False, execution_time_ms=100,
+    ),
+    CommandExecutionResult(
+        step_id=0, command="", exit_code=1,
+        stdout="",
+        stderr="Timeout: Operation did not complete within 30 seconds.",
+        success=False, execution_time_ms=30000,
+    ),
+    CommandExecutionResult(
+        step_id=0, command="", exit_code=1,
+        stdout="",
+        stderr="Error: Resource temporarily unavailable. Another process holds the lock.",
+        success=False, execution_time_ms=2000,
+    ),
+]
+
+
+class MockCommandRunner(CommandRunner):
+    """
+    Mock 命令执行器
+
+    模拟真实命令执行，返回预设的 stdout/stderr/exit_code。
+    支持两种模式：
+    1. 正常模式：根据命令关键词匹配预设响应
+    2. 故障注入模式：随机触发失败场景，测试闭环执行器的错误处理
+
+    替换为生产实现只需实现 SubprocessCommandRunner：
+        async def run(self, command, step_id, timeout=30):
+            proc = await asyncio.create_subprocess_exec(
+                *shlex.split(command),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return CommandExecutionResult(
+                step_id=step_id, command=command,
+                exit_code=proc.returncode,
+                stdout=stdout.decode(), stderr=stderr.decode(),
+                success=proc.returncode == 0,
+            )
+    """
+
+    def __init__(self, failure_rate: float = 0.15):
+        """
+        Args:
+            failure_rate: 故障注入概率，0.0~1.0，默认 0.15（15%）
+        """
+        self.failure_rate = failure_rate
+
+    async def run(self, command: str, step_id: int, timeout: int = 30) -> CommandExecutionResult:
+        logger.debug(f"[MockRunner] 执行步骤 {step_id}: {command}")
+
+        # 故障注入：随机触发失败
+        if random.random() < self.failure_rate:
+            result = random.choice(MOCK_FAILURE_RESPONSES)
+            result = result.model_copy(update={
+                "step_id": step_id,
+                "command": command,
+            })
+            logger.info(f"[MockRunner] 步骤 {step_id} 故障注入: exit_code={result.exit_code}")
+            return result
+
+        # 根据命令关键词匹配预设响应
+        import re
+        for pattern, response in MOCK_RESPONSES.items():
+            if re.search(pattern, command, re.IGNORECASE):
+                result = response.model_copy(update={
+                    "step_id": step_id,
+                    "command": command,
+                })
+                logger.debug(f"[MockRunner] 步骤 {step_id} 匹配模式: {pattern}")
+                return result
+
+        # 默认成功响应
+        result = DEFAULT_SUCCESS_RESPONSE.model_copy(update={
+            "step_id": step_id,
+            "command": command,
+        })
+        logger.debug(f"[MockRunner] 步骤 {step_id} 使用默认响应")
+        return result
+
+
+# ============================================================
+# 安全靶场命令执行器
+# ============================================================
+
+class SafeDockerCommandRunner(CommandRunner):
+    """
+    安全 Docker 靶场执行器
+
+    这个执行器用于 SREBench Lite，不执行任意 shell。
+    它只接受白名单命令，并且始终通过 subprocess 参数数组执行，
+    不经过 shell 字符串拼接，从源头避免命令注入。
+
+    支持的动作：
+    1. 恢复固定故障：python lab/chaos.py recover <FAULT>
+    2. 启动/重启固定容器：docker start/restart srebench-xxx
+    3. 重建固定索引：docker exec srebench-postgres psql ... create index ...
+    4. 安全 HTTP 验证：curl http://localhost:18080/health 等固定 URL
+    """
+
+    _ALLOWED_LAB_FAULTS = {
+        "DB_CONN_FAIL",
+        "APP_PROCESS_DOWN",
+        "REDIS_DOWN",
+        "NGINX_BAD_ROUTE",
+        "DB_SLOW_QUERY",
+    }
+
+    _ALLOWED_DOCKER_COMMANDS = {
+        ("docker", "start", "srebench-postgres"),
+        ("docker", "start", "srebench-app"),
+        ("docker", "start", "srebench-redis"),
+        ("docker", "restart", "srebench-nginx"),
+    }
+
+    _ALLOWED_CONTAINERS = {
+        "srebench-postgres",
+        "srebench-app",
+        "srebench-redis",
+        "srebench-nginx",
+    }
+
+    _ALLOWED_HTTP_URLS = {
+        "http://localhost:18080/health",
+        "http://localhost:18081/health",
+        "http://localhost:18080/cache/ping",
+        "http://localhost:18080/orders/pending",
+    }
+
+    _ALLOWED_INDEX_SQL = (
+        "create index if not exists idx_orders_status_created_at "
+        "on orders (status, created_at desc)"
+    )
+
+    async def run(self, command: str, step_id: int, timeout: int = 30) -> CommandExecutionResult:
+        started = time.perf_counter()
+        try:
+            if self._is_noop_command(command):
+                return CommandExecutionResult(
+                    step_id=step_id,
+                    command=command,
+                    exit_code=0,
+                    stdout="跳过空回滚命令",
+                    stderr="",
+                    success=True,
+                    execution_time_ms=0,
+                )
+
+            action = self._resolve_action(command)
+            if action["type"] == "http":
+                return await asyncio.to_thread(
+                    self._run_http_probe,
+                    command,
+                    step_id,
+                    action["url"],
+                    started,
+                    timeout,
+                )
+
+            completed = await asyncio.to_thread(
+                subprocess.run,
+                action["args"],
+                cwd=PROJECT_ROOT,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            return CommandExecutionResult(
+                step_id=step_id,
+                command=command,
+                exit_code=completed.returncode,
+                stdout=(completed.stdout or "").strip(),
+                stderr=(completed.stderr or "").strip(),
+                success=completed.returncode == 0,
+                execution_time_ms=elapsed_ms,
+            )
+        except ValueError as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning(f"[SafeDockerRunner] 拒绝执行非白名单命令: {command}")
+            return CommandExecutionResult(
+                step_id=step_id,
+                command=command,
+                exit_code=126,
+                stdout="",
+                stderr=f"命令未在 SREBench Lite 白名单中，已拒绝执行: {exc}",
+                success=False,
+                execution_time_ms=elapsed_ms,
+            )
+        except subprocess.TimeoutExpired as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            return CommandExecutionResult(
+                step_id=step_id,
+                command=command,
+                exit_code=124,
+                stdout=(exc.stdout or "").strip() if isinstance(exc.stdout, str) else "",
+                stderr=f"命令超时: {timeout}s",
+                success=False,
+                execution_time_ms=elapsed_ms,
+            )
+        except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            return CommandExecutionResult(
+                step_id=step_id,
+                command=command,
+                exit_code=1,
+                stdout="",
+                stderr=f"执行异常: {exc}",
+                success=False,
+                execution_time_ms=elapsed_ms,
+            )
+
+    def _resolve_action(self, command: str) -> dict:
+        parts = shlex.split(command, posix=True)
+        if not parts:
+            raise ValueError("空命令")
+
+        lab_action = self._resolve_lab_recover(parts)
+        if lab_action:
+            return lab_action
+
+        docker_action = self._resolve_docker(parts)
+        if docker_action:
+            return docker_action
+
+        http_action = self._resolve_http_probe(parts)
+        if http_action:
+            return http_action
+
+        raise ValueError(command)
+
+    def _resolve_lab_recover(self, parts: list[str]) -> Optional[dict]:
+        if len(parts) != 4:
+            return None
+        executable, script, action, fault = parts
+        script_name = script.replace("\\", "/")
+        if executable not in {"python", "python3", "py", sys.executable}:
+            return None
+        if not script_name.endswith("lab/chaos.py"):
+            return None
+        if action != "recover" or fault not in self._ALLOWED_LAB_FAULTS:
+            return None
+        return {
+            "type": "process",
+            "args": [sys.executable, str(LAB_CHAOS_SCRIPT), "recover", fault],
+        }
+
+    def _resolve_docker(self, parts: list[str]) -> Optional[dict]:
+        if tuple(parts) in self._ALLOWED_DOCKER_COMMANDS:
+            return {"type": "process", "args": parts}
+
+        if self._is_allowed_docker_readonly(parts):
+            return {"type": "process", "args": parts}
+
+        if self._is_allowed_psql_index_command(parts):
+            return {"type": "process", "args": parts}
+
+        return None
+
+    def _is_noop_command(self, command: Optional[str]) -> bool:
+        return not _is_effective_command(command)
+
+    def _is_allowed_docker_readonly(self, parts: list[str]) -> bool:
+        if not parts or parts[0] != "docker":
+            return False
+
+        if len(parts) == 2 and parts[1] == "ps":
+            return True
+
+        if parts[1] == "ps":
+            return self._is_allowed_docker_ps(parts[2:])
+
+        if len(parts) == 3 and parts[1] == "inspect" and parts[2] in self._ALLOWED_CONTAINERS:
+            return True
+
+        if parts[1] == "logs":
+            return self._is_allowed_docker_logs(parts[2:])
+
+        if self._is_allowed_pg_ready_command(parts):
+            return True
+
+        return False
+
+    def _is_allowed_docker_ps(self, args: list[str]) -> bool:
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg in {"-a", "--all"}:
+                index += 1
+                continue
+            if arg == "--filter":
+                if index + 1 >= len(args):
+                    return False
+                filter_arg = args[index + 1]
+                if not self._is_allowed_name_filter(filter_arg):
+                    return False
+                index += 2
+                continue
+            if arg.startswith("--filter="):
+                if not self._is_allowed_name_filter(arg.split("=", 1)[1]):
+                    return False
+                index += 1
+                continue
+            if arg == "--format":
+                if index + 1 >= len(args):
+                    return False
+                index += 2
+                continue
+            if arg.startswith("--format="):
+                index += 1
+                continue
+            return False
+        return True
+
+    def _is_allowed_name_filter(self, filter_arg: str) -> bool:
+        if not filter_arg.startswith("name="):
+            return False
+        name = filter_arg.split("=", 1)[1]
+        return name in self._ALLOWED_CONTAINERS
+
+    def _is_allowed_docker_logs(self, args: list[str]) -> bool:
+        if not args:
+            return False
+
+        container = args[-1]
+        if container not in self._ALLOWED_CONTAINERS:
+            return False
+
+        index = 0
+        while index < len(args) - 1:
+            arg = args[index]
+            if arg == "--tail":
+                if index + 1 >= len(args) - 1:
+                    return False
+                return args[index + 1].isdigit()
+            if arg.startswith("--tail="):
+                return arg.split("=", 1)[1].isdigit()
+            return False
+
+        return True
+
+    def _is_allowed_pg_ready_command(self, parts: list[str]) -> bool:
+        if len(parts) < 5:
+            return False
+        if parts[:4] != ["docker", "exec", "srebench-postgres", "pg_isready"]:
+            return False
+        allowed_args = {"-U", "labuser", "-d", "labdb"}
+        return all(part in allowed_args for part in parts[4:])
+
+    def _is_allowed_psql_index_command(self, parts: list[str]) -> bool:
+        if len(parts) < 10:
+            return False
+        prefix = ["docker", "exec", "srebench-postgres", "psql"]
+        if parts[:4] != prefix:
+            return False
+        if "-U" not in parts or "-d" not in parts or "-c" not in parts:
+            return False
+        try:
+            user = parts[parts.index("-U") + 1]
+            database = parts[parts.index("-d") + 1]
+            sql = parts[parts.index("-c") + 1]
+        except IndexError:
+            return False
+        normalized_sql = " ".join(sql.strip().rstrip(";").lower().split())
+        allowed_sql = " ".join(self._ALLOWED_INDEX_SQL.lower().split())
+        return user == "labuser" and database == "labdb" and normalized_sql == allowed_sql
+
+    def _resolve_http_probe(self, parts: list[str]) -> Optional[dict]:
+        if len(parts) == 2 and parts[0] == "curl" and parts[1] in self._ALLOWED_HTTP_URLS:
+            return {"type": "http", "url": parts[1]}
+        return None
+
+    def _run_http_probe(
+        self,
+        command: str,
+        step_id: int,
+        url: str,
+        started: float,
+        timeout: int,
+    ) -> CommandExecutionResult:
+        try:
+            req = Request(url, method="GET")
+            with urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                return CommandExecutionResult(
+                    step_id=step_id,
+                    command=command,
+                    exit_code=0 if 200 <= resp.status < 300 else resp.status,
+                    stdout=body[:1000],
+                    stderr="",
+                    success=200 <= resp.status < 300,
+                    execution_time_ms=elapsed_ms,
+                )
+        except HTTPError as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            return CommandExecutionResult(
+                step_id=step_id,
+                command=command,
+                exit_code=exc.code,
+                stdout="",
+                stderr=f"HTTP {exc.code}: {exc.reason}",
+                success=False,
+                execution_time_ms=elapsed_ms,
+            )
+        except URLError as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            return CommandExecutionResult(
+                step_id=step_id,
+                command=command,
+                exit_code=1,
+                stdout="",
+                stderr=str(exc.reason),
+                success=False,
+                execution_time_ms=elapsed_ms,
+            )
+
+
+# ============================================================
+# 闭环执行器核心
+# ============================================================
+
+class ClosedLoopExecutor:
+    """
+    闭环执行器：Observe → Decide → Act
+
+    核心循环：
+    1. 执行当前步骤（通过 CommandRunner）
+    2. 观察执行结果（exit_code, stdout, stderr）
+    3. 如果成功 → 继续下一步
+    4. 如果失败 → LLM 分析错误 → 决定重试/调整/回滚
+    5. 重复直到所有步骤完成或触发回滚
+
+    这才是真正的 Agent 架构——在真实环境中行动、观察、适应。
+    """
+
+    def __init__(
+        self,
+        command_runner: CommandRunner,
+        llm=None,
+        max_retries_per_step: int = 2,
+    ):
+        """
+        Args:
+            command_runner: 命令执行器（Mock 或真实）
+            llm: LLM 实例，用于失败时的错误分析（可选，无 LLM 则直接回滚）
+            max_retries_per_step: 每步最大重试次数
+        """
+        self.runner = command_runner
+        self.llm = llm
+        self.max_retries = max_retries_per_step
+
+    async def execute_plan(
+        self,
+        fix_plan: dict,
+        error_analyzer=None,
+    ) -> dict:
+        """
+        执行完整修复方案（闭环）
+
+        流程：
+        1. 遍历 fix_plan.steps
+        2. 对每个步骤调用 _execute_step_with_retry
+        3. 收集执行轨迹（execution_trace）
+        4. 如果某步彻底失败且无法回滚 → 整体失败
+        5. 汇总结果返回
+
+        Args:
+            fix_plan: 修复方案字典，含 steps 列表
+            error_analyzer: 错误分析链（Prompt | LLM），可选
+
+        Returns:
+            {
+                "execution_result": {...},
+                "execution_trace": [...],
+            }
+        """
+        steps = fix_plan.get("steps", [])
+        plan_id = fix_plan.get("plan_id", "UNKNOWN")
+        executed_steps = []
+        execution_trace = []
+        overall_status = "success"
+
+        logger.info(
+            f"[ClosedLoopExecutor] 开始执行方案 {plan_id}, "
+            f"共 {len(steps)} 个步骤"
+        )
+
+        for step in steps:
+            step_id = step.get("step_id", 0)
+            command = step.get("command", "")
+            rollback_command = step.get("rollback_command", "")
+
+            # 闭环执行单步（含重试和 LLM 决策）
+            step_result, step_trace = await self._execute_step_with_retry(
+                step=step,
+                error_analyzer=error_analyzer,
+            )
+
+            execution_trace.extend(step_trace)
+
+            if step_result.success:
+                executed_steps.append({
+                    "step_id": step_id,
+                    "action": step.get("action", ""),
+                    "command": command,
+                    "status": "success",
+                    "exit_code": step_result.exit_code,
+                    "stdout": step_result.stdout,
+                    "stderr": step_result.stderr,
+                    "attempts": len([t for t in step_trace if t.get("trace_type") == "execute"]),
+                })
+            else:
+                # 步骤彻底失败，尝试回滚
+                overall_status = "failed"
+                executed_steps.append({
+                    "step_id": step_id,
+                    "action": step.get("action", ""),
+                    "command": command,
+                    "status": "failed",
+                    "exit_code": step_result.exit_code,
+                    "stdout": step_result.stdout,
+                    "stderr": step_result.stderr,
+                })
+
+                # 执行回滚
+                if _is_effective_command(rollback_command):
+                    logger.info(f"[ClosedLoopExecutor] 步骤 {step_id} 失败，执行回滚: {rollback_command}")
+                    rollback_result = await self.runner.run(rollback_command, step_id=-step_id)
+                    execution_trace.append({
+                        "trace_type": "rollback",
+                        "step_id": step_id,
+                        "command": rollback_command,
+                        "exit_code": rollback_result.exit_code,
+                        "success": rollback_result.success,
+                        "stdout": rollback_result.stdout,
+                        "stderr": rollback_result.stderr,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+                    executed_steps.append({
+                        "step_id": step_id,
+                        "action": f"回滚步骤 {step_id}",
+                        "command": rollback_command,
+                        "status": "rollback_success" if rollback_result.success else "rollback_failed",
+                        "exit_code": rollback_result.exit_code,
+                        "stdout": rollback_result.stdout,
+                        "stderr": rollback_result.stderr,
+                    })
+                else:
+                    logger.warning(f"[ClosedLoopExecutor] 步骤 {step_id} 失败且无回滚命令")
+                    execution_trace.append({
+                        "trace_type": "rollback_skipped",
+                        "step_id": step_id,
+                        "reason": "无回滚命令",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+
+                # 失败后不再继续执行后续步骤
+                break
+
+        result = {
+            "plan_id": plan_id,
+            "executed_steps": executed_steps,
+            "overall_status": overall_status,
+            "summary": f"执行{'完成' if overall_status == 'success' else '失败'}，"
+                       f"共执行 {len(executed_steps)} 个步骤",
+            "total_steps": len(steps),
+            "completed_steps": len([s for s in executed_steps if s.get("status") == "success"]),
+        }
+
+        logger.info(
+            f"[ClosedLoopExecutor] 方案 {plan_id} 执行结束: "
+            f"status={overall_status}, "
+            f"completed={result['completed_steps']}/{result['total_steps']}"
+        )
+
+        return {
+            "execution_result": result,
+            "execution_trace": execution_trace,
+        }
+
+    async def _execute_step_with_retry(
+        self,
+        step: dict,
+        error_analyzer=None,
+    ) -> tuple[CommandExecutionResult, list[dict]]:
+        """
+        执行单步骤（含重试和 LLM 错误分析）
+
+        流程：
+        1. 执行命令 → 观察结果
+        2. 成功 → 返回
+        3. 失败 → LLM 分析错误 → 决定 retry/adjust/rollback
+        4. retry → 重新执行（最多 max_retries 次）
+        5. adjust → 用 LLM 调整后的命令重新执行
+        6. rollback → 返回失败，由上层处理回滚
+
+        Args:
+            step: 步骤字典，含 step_id, command, action 等
+            error_analyzer: 错误分析链（Prompt | LLM）
+
+        Returns:
+            (最终执行结果, 执行轨迹列表)
+        """
+        step_id = step.get("step_id", 0)
+        command = step.get("command", "")
+        trace = []
+        current_command = command
+
+        for attempt in range(1, self.max_retries + 1):
+            # 执行命令
+            logger.info(
+                f"[ClosedLoopExecutor] 步骤 {step_id} 第 {attempt} 次执行: "
+                f"{current_command[:80]}"
+            )
+
+            result = await self.runner.run(current_command, step_id)
+
+            trace.append({
+                "trace_type": "execute",
+                "step_id": step_id,
+                "attempt": attempt,
+                "command": current_command,
+                "exit_code": result.exit_code,
+                "success": result.success,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+            if result.success:
+                logger.info(f"[ClosedLoopExecutor] 步骤 {step_id} 第 {attempt} 次执行成功")
+                return result, trace
+
+            # 执行失败，尝试 LLM 错误分析
+            logger.warning(
+                f"[ClosedLoopExecutor] 步骤 {step_id} 第 {attempt} 次执行失败: "
+                f"exit_code={result.exit_code}, stderr={result.stderr[:100]}"
+            )
+
+            if error_analyzer and attempt < self.max_retries:
+                # LLM 分析错误，决定下一步动作
+                decision = await self._analyze_error(
+                    step=step,
+                    command=current_command,
+                    result=result,
+                    attempt=attempt,
+                    error_analyzer=error_analyzer,
+                )
+
+                trace.append({
+                    "trace_type": "llm_decision",
+                    "step_id": step_id,
+                    "attempt": attempt,
+                    "action": decision.action,
+                    "reasoning": decision.reasoning,
+                    "adjusted_command": decision.adjusted_command,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+                if decision.action == "retry":
+                    logger.info(f"[ClosedLoopExecutor] LLM 决策: 重试步骤 {step_id}")
+                    continue
+                elif decision.action == "adjust" and decision.adjusted_command:
+                    logger.info(
+                        f"[ClosedLoopExecutor] LLM 决策: 调整命令 "
+                        f"{current_command[:50]} → {decision.adjusted_command[:50]}"
+                    )
+                    current_command = decision.adjusted_command
+                    continue
+                elif decision.action == "rollback":
+                    logger.info(f"[ClosedLoopExecutor] LLM 决策: 回滚步骤 {step_id}")
+                    return result, trace
+                elif decision.action == "skip":
+                    logger.info(f"[ClosedLoopExecutor] LLM 决策: 跳过步骤 {step_id}")
+                    # 跳过视为成功（LLM 判断该步骤非必要）
+                    return CommandExecutionResult(
+                        step_id=step_id,
+                        command=current_command,
+                        exit_code=0,
+                        stdout="[SKIPPED] LLM 判断该步骤可跳过",
+                        stderr="",
+                        success=True,
+                        execution_time_ms=0,
+                    ), trace
+            else:
+                # 无 LLM 或已达最大重试次数
+                if attempt < self.max_retries:
+                    logger.info(f"[ClosedLoopExecutor] 无 LLM 分析器，简单重试步骤 {step_id}")
+                    continue
+                else:
+                    logger.warning(
+                        f"[ClosedLoopExecutor] 步骤 {step_id} 达到最大重试次数 "
+                        f"{self.max_retries}，放弃"
+                    )
+
+        # 所有重试都失败
+        return result, trace
+
+    async def _analyze_error(
+        self,
+        step: dict,
+        command: str,
+        result: CommandExecutionResult,
+        attempt: int,
+        error_analyzer,
+    ) -> ErrorAnalysisOutput:
+        """
+        LLM 分析执行错误，决定下一步动作
+
+        这是闭环执行器的核心决策点：
+        - 输入：步骤信息 + 执行结果（真实的 stdout/stderr/exit_code）
+        - 输出：retry / adjust / rollback / skip
+        - 由真实错误驱动决策，不是 LLM 凭空决定
+
+        Args:
+            step: 步骤信息
+            command: 执行的命令
+            result: 执行结果
+            attempt: 当前重试次数
+            error_analyzer: 错误分析链（Prompt | LLM）
+
+        Returns:
+            ErrorAnalysisOutput: LLM 的决策
+        """
+        try:
+            decision = await error_analyzer.ainvoke({
+                "step_id": step.get("step_id"),
+                "action": step.get("action", ""),
+                "command": command,
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "attempt": attempt,
+                "max_retries": self.max_retries,
+                "risk_level": step.get("risk_level", "low"),
+            })
+
+            if decision is None:
+                return ErrorAnalysisOutput(
+                    action="rollback",
+                    reasoning="LLM 分析返回空结果，默认回滚",
+                    estimated_fix_probability=0.0,
+                )
+
+            logger.info(
+                f"[ClosedLoopExecutor] LLM 错误分析: action={decision.action}, "
+                f"reasoning={decision.reasoning[:80]}"
+            )
+            return decision
+
+        except Exception as e:
+            logger.error(f"[ClosedLoopExecutor] LLM 错误分析失败: {e}")
+            return ErrorAnalysisOutput(
+                action="rollback",
+                reasoning=f"LLM 分析异常: {str(e)}，默认回滚",
+                estimated_fix_probability=0.0,
+            )
