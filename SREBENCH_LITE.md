@@ -100,6 +100,14 @@ python server.py
 }
 ```
 
+如果 Executor 执行失败，会先进入 Replanner/Critic 节点。Replanner 会读取
+`stderr`、`stdout` 和 `execution_trace`，判断失败类型并选择下一步：
+
+- `retry`：环境临时不可用、连接拒绝、超时等，回到 `execute`
+- `re-diagnose`：命令不在白名单、诊断目标不匹配、缺少工具上下文，回到诊断链路
+- `rollback`：Executor 已执行回滚，停止继续修复并保存当前状态
+- `escalate`：重规划预算耗尽或权限/高风险失败，保存并交由人工处理
+
 ## 评测
 
 先启动主工单 API：

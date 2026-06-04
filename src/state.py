@@ -124,6 +124,17 @@ class SystemState(BaseModel):
     # ========== 恢复验证 ==========
     verification_result: Optional[Dict[str, Any]] = Field(None, description="恢复验证结果")
 
+    # ========== 执行失败后重规划 ==========
+    replanner_result: Optional[Dict[str, Any]] = Field(
+        None, description="Replanner/Critic 的决策结果，包含 decision、failure_type、reason 等"
+    )
+    replanner_round: int = Field(
+        0, description="Replanner 已介入的轮次，每调用一次 Replanner 节点就 +1"
+    )
+    max_replanner_rounds: int = Field(
+        2, description="Replanner 允许的最大介入轮次，超过则强制 escalate（升级人工处理）"
+    )
+
     # ========== 审计日志（用于可追溯性） ==========
     audit_logs: Annotated[List[Dict[str, Any]], operator.add] = Field(
         default_factory=list,

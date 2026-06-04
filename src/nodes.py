@@ -19,6 +19,7 @@ from database import AsyncSessionLocal, save_ticket
 from guardrail import run_guardrail
 from action_dsl import ActionDSLValidationError, compile_rollback_action, compile_step_action
 from executor_v2 import ClosedLoopExecutor, MockCommandRunner, SafeDockerCommandRunner
+from replanner import make_replanner_decision
 from logger import logger
 from config import settings
 
@@ -593,6 +594,89 @@ def create_save_node():
                 logger.debug("[Save] 数据库会话已关闭")
 
     return save_node
+
+
+def create_replanner_node():
+    """创建执行失败后的 Replanner/Critic 节点。
+
+    Replanner 读取 Executor 的 stdout/stderr/trace，对失败进行分类并决策：
+    - command_not_allowed: 命令或 Action DSL 不被允许
+    - environment_not_ready: 环境或靶场临时未就绪
+    - diagnosis_mismatch: 诊断结论或目标不匹配
+    - tooling_gap: 缺少必要的诊断工具或上下文
+    - permission_or_privilege: 权限不足或涉及高风险操作
+
+    最终输出 decision: retry / re-diagnose / rollback / escalate / verify。
+    """
+
+    async def replanner_node(state: SystemState) -> dict:
+        # 调用纯规则决策引擎，获取下一步该走哪条路
+        decision = make_replanner_decision(
+            execution_result=state.execution_result,
+            execution_trace=state.execution_trace,
+            replanner_round=state.replanner_round,
+            max_replanner_rounds=state.max_replanner_rounds,
+        )
+
+        action = decision.get("decision", "escalate")
+        failure_type = decision.get("failure_type", "unknown")
+        logger.info(
+            f"[Replanner] decision={action}, failure_type={failure_type}, "
+            f"round={decision.get('replanner_round')}/{state.max_replanner_rounds}"
+        )
+
+        # 把 Replanner 的决策也写回 execution_result，方便后续节点查看
+        execution_result = {
+            **(state.execution_result or {}),
+            "replanner_decision": decision,
+        }
+
+        # 构造需要更新到工作流状态的字典
+        updates = {
+            "replanner_result": decision,
+            "replanner_round": decision.get("replanner_round", state.replanner_round),
+            "execution_result": execution_result,
+            "messages": [
+                f"Replanner: {action} - {failure_type} - {decision.get('reason')}"
+            ],
+            "audit_logs": [{
+                "ticket_id": state.ticket_id,
+                "agent_name": "replanner",
+                "action_type": "replan",
+                "action_detail": {
+                    "decision": action,
+                    "failure_type": failure_type,
+                    "reason": decision.get("reason"),
+                    "round": decision.get("replanner_round"),
+                    "max_rounds": state.max_replanner_rounds,
+                },
+                "input_context": {
+                    "execution_result": state.execution_result,
+                    "trace_count": len(state.execution_trace),
+                },
+                "output_result": decision,
+                "dispatch_round": state.dispatch_round,
+            }],
+        }
+
+        # 如果决策是重新诊断，需要把工作流状态回退到诊断之前，清空上一轮的结果
+        if action == "re-diagnose":
+            updates.update({
+                "dispatched_agents": ["db_agent", "net_agent", "app_agent"],
+                "dispatch_round": 0,
+                "db_agent_result": None,
+                "net_agent_result": None,
+                "app_agent_result": None,
+                "aggregated_diagnosis": None,
+                "fix_plan": None,
+                "guardrail_result": None,
+                "approval_status": ApprovalStatus.PENDING,
+                "verification_result": None,
+            })
+
+        return updates
+
+    return replanner_node
 
 
 def create_guardrail_node():

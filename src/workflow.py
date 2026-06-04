@@ -5,7 +5,7 @@ LangGraph 工作流定义 - Multi-Agent 架构
     Supervisor → Dispatch(并行派发) → DynamicCheck → [有协作请求?]
                                                     ├─ 是 → Dispatch(追加派发) → DynamicCheck → ...
                                                     └─ 否 → Aggregate(聚合推理) → Fix → RepairPlanner → Guardrail → [通过?]
-                                                                                              ├─ 是 → Human Approval → Executor(闭环) → Verify → Save
+                                                                                              ├─ 是 → Human Approval → Executor(闭环) → Replanner → Verify/Retry/Re-diagnose/Save
                                                                                               └─ 否 → END(方案被拦截)
                     ↓ (other/无Agent)
                 Other Handler → END
@@ -20,6 +20,7 @@ LangGraph 工作流定义 - Multi-Agent 架构
 - Agent 间通过 CommunicationBus 通信
 - Guardrail 确定性安全护栏：用代码规则约束 LLM 输出边界
 - Executor 闭环执行器：Observe → Decide → Act 循环
+- Replanner/Critic：执行失败后读取 trace 并选择 retry/re-diagnose/rollback/escalate
 - Verify 恢复验证节点：探测 /health、/cache/ping、/orders/pending
 - Save 统一归档节点：执行和验证完成后保存工单
 
@@ -57,6 +58,7 @@ from nodes import (
     create_guardrail_node,
     create_human_approval_node,
     create_executor_node,
+    create_replanner_node,
     create_verify_node,
     create_save_node,
     create_other_handler_node,
@@ -92,6 +94,18 @@ def route_after_guardrail(state: SystemState) -> str:
     return END
 
 
+def route_after_replanner(state: SystemState) -> str:
+    """Replanner 后路由：根据 Critic 决策进入验证、重试、重诊断或保存。"""
+    decision = (state.replanner_result or {}).get("decision", "escalate")
+    if decision == "verify":
+        return "verify"
+    if decision == "retry":
+        return "execute"
+    if decision == "re-diagnose":
+        return "dispatch"
+    return "save"
+
+
 def _get_mcp_server_path() -> str:
     """获取MCP Server脚本绝对路径"""
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -118,8 +132,9 @@ async def create_async_workflow(llm, checkpointer=None):
     5. RepairPlanner 规范化修复计划
     6. Human Approval 人工审批
     7. Executor 执行修复
-    8. Verify 验证恢复
-    9. Save 保存工单
+    8. Replanner/Critic 判定执行结果并决策下一步
+    9. Verify 验证恢复
+    10. Save 保存工单
 
     MCP Client 在此处一次性初始化:
     1. 启动 MCP Server 子进程 (stdio)
@@ -169,7 +184,8 @@ async def create_async_workflow(llm, checkpointer=None):
     repair_planner_node = create_repair_planner_node()
     guardrail_node = create_guardrail_node()
     human_approval_node = create_human_approval_node()
-    executor_node = create_executor_node(llm)  # 闭环执行器，传入 LLM 用于错误分析
+    executor_node = create_executor_node(llm)  # 闭环执行器，传入 LLM 用于执行过程中的错误分析
+    replanner_node = create_replanner_node()
     verify_node = create_verify_node()
     save_node = create_save_node()
     other_handler_node = create_other_handler_node()
@@ -187,6 +203,7 @@ async def create_async_workflow(llm, checkpointer=None):
     workflow.add_node("guardrail", guardrail_node)
     workflow.add_node("human_approval", human_approval_node)
     workflow.add_node("execute", executor_node)
+    workflow.add_node("replanner", replanner_node)
     workflow.add_node("verify", verify_node)
     workflow.add_node("save", save_node)
     workflow.add_node("other_handler", other_handler_node)
@@ -230,8 +247,18 @@ async def create_async_workflow(llm, checkpointer=None):
         {"execute": "execute", END: END},
     )
 
-    # 执行完成 → 验证恢复 → 保存工单 → 结束
-    workflow.add_edge("execute", "verify")
+    # 执行完成 → Replanner 判定 → 验证/重试/重诊断/保存
+    workflow.add_edge("execute", "replanner")
+    workflow.add_conditional_edges(
+        "replanner",
+        route_after_replanner,
+        {
+            "verify": "verify",
+            "execute": "execute",
+            "dispatch": "dispatch",
+            "save": "save",
+        },
+    )
     workflow.add_edge("verify", "save")
     workflow.add_edge("save", END)
     workflow.add_edge("other_handler", END)
