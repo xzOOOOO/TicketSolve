@@ -14,6 +14,7 @@ from langgraph.types import interrupt
 from langgraph.errors import GraphInterrupt
 from database import AsyncSessionLocal, save_ticket
 from guardrail import run_guardrail
+from action_dsl import ActionDSLValidationError, compile_rollback_action, compile_step_action
 from executor_v2 import ClosedLoopExecutor, MockCommandRunner, SafeDockerCommandRunner
 from logger import logger
 from config import settings
@@ -353,6 +354,101 @@ def create_other_handler_node():
     return other_handler_node
 
 
+def create_repair_planner_node():
+    """
+    创建修复规划节点。
+
+    RepairPlanner 位于 FixAgent 和 Guardrail 之间，负责把 FixAgent 生成的
+    平铺 Action DSL 规范化为可审计的修复计划：
+    - action_type + target 合法时，编译出 canonical command 供审批展示
+    - rollback_action_type + rollback_target 合法时，编译出 rollback_command
+    - 非法 DSL 不在这里吞掉，保留给 Guardrail 拦截并给出违规明细
+    """
+
+    async def repair_planner_node(state: SystemState) -> dict:
+        fix_plan = state.fix_plan
+
+        if not fix_plan:
+            logger.warning("[RepairPlanner] 无修复方案，跳过规划")
+            return {"messages": ["RepairPlanner: 无修复方案，跳过"]}
+
+        plan_dict = fix_plan if isinstance(fix_plan, dict) else fix_plan.model_dump()
+        plan_dict = {**plan_dict}
+        raw_steps = plan_dict.get("steps", []) or []
+        planned_steps = []
+        compiled_count = 0
+        rollback_compiled_count = 0
+        invalid_count = 0
+
+        for raw_step in raw_steps:
+            step = raw_step if isinstance(raw_step, dict) else raw_step.model_dump()
+            step = {**step}
+            step_id = step.get("step_id", "?")
+
+            try:
+                compiled = compile_step_action(step)
+                if compiled:
+                    step["action_type"] = compiled.action_type
+                    step["target"] = compiled.target
+                    step["command"] = compiled.command
+                    compiled_count += 1
+            except ActionDSLValidationError as exc:
+                invalid_count += 1
+                logger.warning(f"[RepairPlanner] 步骤 {step_id} 动作 DSL 非法: {exc}")
+
+            try:
+                rollback = compile_rollback_action(step)
+                if rollback:
+                    step["rollback_action_type"] = rollback.action_type
+                    step["rollback_target"] = rollback.target
+                    step["rollback_command"] = rollback.command
+                    rollback_compiled_count += 1
+            except ActionDSLValidationError as exc:
+                invalid_count += 1
+                logger.warning(f"[RepairPlanner] 步骤 {step_id} 回滚 DSL 非法: {exc}")
+
+            step.setdefault("parameters", {})
+            step.setdefault("rollback_parameters", {})
+            planned_steps.append(step)
+
+        plan_dict["steps"] = planned_steps
+
+        audit_log = {
+            "ticket_id": state.ticket_id,
+            "agent_name": "repair_planner",
+            "action_type": "repair_plan",
+            "action_detail": {
+                "plan_id": plan_dict.get("plan_id"),
+                "steps_count": len(planned_steps),
+                "compiled_actions": compiled_count,
+                "compiled_rollbacks": rollback_compiled_count,
+                "invalid_action_specs": invalid_count,
+            },
+            "input_context": {
+                "source": "fix_agent",
+                "plan_id": plan_dict.get("plan_id"),
+            },
+            "output_result": plan_dict,
+            "dispatch_round": state.dispatch_round,
+        }
+
+        logger.info(
+            f"[RepairPlanner] 规划完成: plan_id={plan_dict.get('plan_id')}, "
+            f"steps={len(planned_steps)}, compiled={compiled_count}, "
+            f"rollback_compiled={rollback_compiled_count}, invalid={invalid_count}"
+        )
+
+        return {
+            "fix_plan": plan_dict,
+            "messages": [
+                f"RepairPlanner: 规划完成 - {compiled_count}/{len(planned_steps)} 个动作已编译"
+            ],
+            "audit_logs": [audit_log],
+        }
+
+    return repair_planner_node
+
+
 def create_guardrail_node():
     """
     创建安全护栏节点
@@ -396,8 +492,9 @@ def create_guardrail_node():
                 ],
             }
         else:
-            critical_violations = [v for v in result.violations if v["severity"] == "critical"]
-            warning_violations = [v for v in result.violations if v["severity"] == "warning"]
+            violations = result_dict.get("violations", [])
+            critical_violations = [v for v in violations if v.get("severity") == "critical"]
+            warning_violations = [v for v in violations if v.get("severity") == "warning"]
             violation_summary = "; ".join(v["message"] for v in critical_violations)
             logger.warning(f"[Guardrail] 检查未通过: {violation_summary}")
 

@@ -29,14 +29,30 @@ class ApprovalStatus(str, Enum):
 
 
 class FixStep(BaseModel):
-    """修复步骤"""
+    """
+    修复步骤（工作流状态中的步骤模型）。
+
+    与 schemas.py 中的 FixStepOutput 对应，但字段更宽松（部分字段可选），
+    因为工作流执行过程中步骤可能被部分填充。
+
+    安全执行设计：
+    - action_type + target 组成结构化动作 DSL，由 action_dsl.py 编译成安全命令
+    - command 为兼容旧模式的自由文本命令，存在结构化动作时不参与执行
+    - 回滚同理：rollback_action_type + rollback_target > rollback_command
+    """
     step_id: int = Field(..., description="步骤编号")
-    action: str = Field(..., description="修复动作描述")
-    command: Optional[str] = Field(None, description="执行的命令")
+    action: str = Field(..., description="修复动作描述（人可读）")
+    action_type: Optional[str] = Field(None, description="结构化动作类型，如 RECOVER_FAULT/START_CONTAINER 等；优先于 command 执行")
+    target: Optional[str] = Field(None, description="结构化动作目标，如 APP_PROCESS_DOWN/srebench-app 等；与 action_type 配合由本地编译器生成安全命令")
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="结构化动作可选参数（预留扩展）")
+    command: Optional[str] = Field(None, description="兼容旧方案的执行命令字符串；存在 action_type + target 时仅用于展示")
     risk_level: str = Field("low", description="风险等级: low/medium/high")
-    expected_output: Optional[str] = Field(None, description="预期输出")
-    on_failure: Optional[str] = Field(None, description="失败时的处理方式")
-    rollback_command: Optional[str] = Field(None, description="回滚命令")
+    expected_output: Optional[str] = Field(None, description="预期输出（用于验证步骤是否成功）")
+    on_failure: Optional[str] = Field(None, description="失败时的处理方式描述")
+    rollback_action_type: Optional[str] = Field(None, description="结构化回滚动作类型，与 action_type 对称")
+    rollback_target: Optional[str] = Field(None, description="结构化回滚动作目标，与 target 对称")
+    rollback_parameters: Dict[str, Any] = Field(default_factory=dict, description="结构化回滚动作可选参数（预留扩展）")
+    rollback_command: Optional[str] = Field(None, description="兼容旧方案的回滚命令字符串；存在结构化回滚动作时仅用于展示")
 
 
 class FixPlan(BaseModel):

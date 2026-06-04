@@ -117,17 +117,21 @@ FIX_PROMPT = ChatPromptTemplate.from_messages([
 
 请生成一个完整的、可执行的修复方案。
 
-如果诊断结果来自 SREBench Lite 靶场，修复步骤里的 command 必须优先使用以下白名单命令，不要生成裸 shell、rm、sed、systemctl、iptables 等命令：
-- python lab/chaos.py recover DB_CONN_FAIL
-- python lab/chaos.py recover APP_PROCESS_DOWN
-- python lab/chaos.py recover REDIS_DOWN
-- python lab/chaos.py recover NGINX_BAD_ROUTE
-- python lab/chaos.py recover DB_SLOW_QUERY
-- docker start srebench-postgres
-- docker start srebench-app
-- docker start srebench-redis
-- docker restart srebench-nginx
-- docker exec srebench-postgres psql -U labuser -d labdb -c "create index if not exists idx_orders_status_created_at on orders (status, created_at desc);"
+如果诊断结果来自 SREBench Lite 靶场，修复步骤必须优先使用结构化 Action DSL，而不是依赖自由文本 command。
+每个修复步骤优先填写 action_type + target，command 可作为展示/兼容字段，但 Executor 会根据 action_type + target 在本地编译白名单命令。
+
+可用 Action DSL：
+- RECOVER_FAULT: target 必须是 DB_CONN_FAIL / APP_PROCESS_DOWN / REDIS_DOWN / NGINX_BAD_ROUTE / DB_SLOW_QUERY
+- START_CONTAINER: target 必须是 srebench-postgres / srebench-app / srebench-redis
+- RESTART_CONTAINER: target 必须是 srebench-nginx
+- REBUILD_ORDERS_INDEX: target 必须是 DB_SLOW_QUERY / srebench-postgres / idx_orders_status_created_at
+- HTTP_PROBE: target 必须是下方验证 URL 之一
+- NOOP: target 为空，用于无需执行的占位步骤
+
+兼容命令示例（仅供展示，不要生成裸 shell、rm、sed、systemctl、iptables 等命令）：
+- {{"action_type": "RECOVER_FAULT", "target": "APP_PROCESS_DOWN", "command": "python lab/chaos.py recover APP_PROCESS_DOWN"}}
+- {{"action_type": "START_CONTAINER", "target": "srebench-app"}}
+- {{"action_type": "REBUILD_ORDERS_INDEX", "target": "DB_SLOW_QUERY"}}
 
 验证命令可以使用：
 - curl http://localhost:18080/health
@@ -140,7 +144,7 @@ FIX_PROMPT = ChatPromptTemplate.from_messages([
 - description: 方案简述
 - risk_level: 风险等级(low/medium/high)
 - prerequisites: 前置条件列表
-- steps: 修复步骤列表，每个步骤包含 step_id(步骤编号，必须是纯数字如 1/2/3，不要带前缀如 STEP-01)、action(动作描述)、command(执行命令)、risk_level(风险等级)、expected_output(预期输出)、on_failure(失败处理)、rollback_command(回滚命令)
+- steps: 修复步骤列表，每个步骤只使用平铺 Action DSL 字段，包含 step_id(步骤编号，必须是纯数字如 1/2/3，不要带前缀如 STEP-01)、action(动作描述)、action_type(结构化动作类型)、target(动作目标)、parameters(可选参数对象)、command(可选兼容展示命令)、risk_level(风险等级)、expected_output(预期输出)、on_failure(失败处理)、rollback_action_type(可选结构化回滚动作类型)、rollback_target(可选结构化回滚目标)、rollback_parameters(可选回滚参数对象)、rollback_command(可选兼容回滚命令)
 - verification: 验证方法，包含 commands(验证命令列表) 和 expected_result(预期结果)
 - estimated_time: 预计执行时间"""),
     ("human", "诊断类型：{diagnosis_type}\n\n诊断结果：{diagnosis_result}\n\n请生成修复方案。")

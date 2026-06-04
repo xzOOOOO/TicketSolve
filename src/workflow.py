@@ -4,7 +4,7 @@ LangGraph 工作流定义 - Multi-Agent 架构
 工作流结构:
     Supervisor → Dispatch(并行派发) → DynamicCheck → [有协作请求?]
                                                     ├─ 是 → Dispatch(追加派发) → DynamicCheck → ...
-                                                    └─ 否 → Aggregate(聚合推理) → Fix → Guardrail → [通过?]
+                                                    └─ 否 → Aggregate(聚合推理) → Fix → RepairPlanner → Guardrail → [通过?]
                                                                                               ├─ 是 → Human Approval → Executor(闭环)
                                                                                               └─ 否 → END(方案被拦截)
                     ↓ (other/无Agent)
@@ -16,6 +16,7 @@ LangGraph 工作流定义 - Multi-Agent 架构
 - DynamicCheck 节点扫描 Agent 间 request_help 消息，动态追加派发
 - Aggregate 节点综合多个 Agent 的诊断结果
 - Fix Agent 优先使用聚合诊断结果
+- RepairPlanner 规范化 Action DSL 并生成可审计命令
 - Agent 间通过 CommunicationBus 通信
 - Guardrail 确定性安全护栏：用代码规则约束 LLM 输出边界
 - Executor 闭环执行器：Observe → Decide → Act 循环
@@ -50,6 +51,7 @@ from nodes import (
     create_dispatch_node,
     create_dynamic_check_node,
     create_aggregate_node,
+    create_repair_planner_node,
     create_guardrail_node,
     create_human_approval_node,
     create_executor_node,
@@ -109,8 +111,9 @@ async def create_async_workflow(llm, checkpointer=None):
     2. Dispatch 并行执行被派发的 Agent
     3. Aggregate 综合各 Agent 诊断结果
     4. Fix Agent 生成修复方案
-    5. Human Approval 人工审批
-    6. Executor 执行修复
+    5. RepairPlanner 规范化修复计划
+    6. Human Approval 人工审批
+    7. Executor 执行修复
 
     MCP Client 在此处一次性初始化:
     1. 启动 MCP Server 子进程 (stdio)
@@ -157,6 +160,7 @@ async def create_async_workflow(llm, checkpointer=None):
     dispatch_node = create_dispatch_node(agent_runners)
     dynamic_check_node = create_dynamic_check_node()
     aggregate_node = create_aggregate_node(llm, communication_bus)
+    repair_planner_node = create_repair_planner_node()
     guardrail_node = create_guardrail_node()
     human_approval_node = create_human_approval_node()
     executor_node = create_executor_node(llm)  # 闭环执行器，传入 LLM 用于错误分析
@@ -171,6 +175,7 @@ async def create_async_workflow(llm, checkpointer=None):
     workflow.add_node("dynamic_check", dynamic_check_node)
     workflow.add_node("aggregate", aggregate_node)
     workflow.add_node("fix_agent", fix_agent.run)
+    workflow.add_node("repair_planner", repair_planner_node)
     workflow.add_node("guardrail", guardrail_node)
     workflow.add_node("human_approval", human_approval_node)
     workflow.add_node("execute", executor_node)
@@ -196,9 +201,10 @@ async def create_async_workflow(llm, checkpointer=None):
         {"dispatch": "dispatch", "aggregate": "aggregate"},
     )
 
-    # Aggregate → Fix → Guardrail（确定性安全检查）
+    # Aggregate → Fix → RepairPlanner → Guardrail（确定性安全检查）
     workflow.add_edge("aggregate", "fix_agent")
-    workflow.add_edge("fix_agent", "guardrail")
+    workflow.add_edge("fix_agent", "repair_planner")
+    workflow.add_edge("repair_planner", "guardrail")
 
     # Guardrail → 通过则进入人工审批，未通过则结束（方案被拦截）
     workflow.add_conditional_edges(

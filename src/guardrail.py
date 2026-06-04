@@ -18,7 +18,11 @@
 
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from action_dsl import (
+    ActionDSLValidationError,
+    compile_rollback_action,
+    compile_step_action,
+)
 from schemas import GuardrailViolation, GuardrailResult
 from logger import logger
 
@@ -49,6 +53,39 @@ DANGEROUS_COMMAND_PATTERNS = [
 ]
 
 
+def _effective_step_command(step: dict) -> str:
+    """
+    获取步骤的有效执行命令。
+
+    优先使用结构化动作 DSL 编译后的命令（安全、白名单校验过）。
+    如果 DSL 编译失败（如 action_type 不在白名单），则返回空字符串，
+    让后续检查跳过该步骤（因为 DSL 校验本身就会拦截非法动作）。
+    如果步骤没有定义结构化动作，则回退到 step["command"] 自由文本命令。
+    """
+    try:
+        compiled = compile_step_action(step)
+        if compiled:
+            return compiled.command
+    except ActionDSLValidationError:
+        return ""
+    return step.get("command", "") or ""
+
+
+def _effective_rollback_command(step: dict) -> str:
+    """
+    获取步骤的有效回滚命令。
+
+    与 _effective_step_command 对称：优先结构化 DSL，失败回退到自由文本。
+    """
+    try:
+        compiled = compile_rollback_action(step)
+        if compiled:
+            return compiled.command
+    except ActionDSLValidationError:
+        return ""
+    return step.get("rollback_command", "") or ""
+
+
 def check_dangerous_commands(steps: list[dict]) -> list[GuardrailViolation]:
     """
     检查步骤中是否包含危险命令
@@ -65,7 +102,7 @@ def check_dangerous_commands(steps: list[dict]) -> list[GuardrailViolation]:
     """
     violations = []
     for step in steps:
-        command = step.get("command", "")
+        command = _effective_step_command(step)
         if not command:
             continue
         for pattern, rule_id, severity, description in DANGEROUS_COMMAND_PATTERNS:
@@ -106,7 +143,7 @@ def check_rollback_completeness(steps: list[dict]) -> list[GuardrailViolation]:
     for step in steps:
         risk = step.get("risk_level", "low").lower()
         if risk in ("high", "medium"):
-            rollback = step.get("rollback_command", "")
+            rollback = _effective_rollback_command(step)
             if not rollback or rollback.strip() in ("", "none", "N/A", "无"):
                 violations.append(GuardrailViolation(
                     rule_id="ROLLBACK_001",
@@ -165,7 +202,7 @@ def check_step_order(steps: list[dict]) -> list[GuardrailViolation]:
         subsequent_step_id = None
 
         for step in sorted_steps:
-            command = step.get("command", "")
+            command = _effective_step_command(step)
             step_id = step.get("step_id", 0)
 
             if prereq_step_id is None and re.search(prereq_pattern, command, re.IGNORECASE):
@@ -220,7 +257,7 @@ def check_command_injection(steps: list[dict]) -> list[GuardrailViolation]:
     """
     violations = []
     for step in steps:
-        command = step.get("command", "")
+        command = _effective_step_command(step)
         if not command:
             continue
         for pattern, rule_id, severity, description in INJECTION_PATTERNS:
@@ -231,6 +268,39 @@ def check_command_injection(steps: list[dict]) -> list[GuardrailViolation]:
                     step_id=step.get("step_id"),
                     message=description,
                     detail=f"步骤 {step.get('step_id', '?')} 命令匹配注入模式: {command}",
+                ))
+    return violations
+
+
+def check_action_dsl_allowed(steps: list[dict]) -> list[GuardrailViolation]:
+    """
+    校验结构化动作 DSL 是否在白名单内。
+
+    这是 Guardrail 对 DSL 的专门检查：在 Executor 执行之前，
+    预先验证每个步骤的正向动作和回滚动作是否都能通过 action_dsl 编译器。
+    如果编译失败（ActionDSLValidationError），说明 action_type + target 组合
+    不在白名单中，属于非法动作，必须拦截。
+
+    为什么需要这个检查？
+    因为 Executor 的 _resolve_step_command 也会做同样的编译，
+    但 Guardrail 在 Executor 之前运行，可以在执行前就发现问题，
+    避免把非法动作送到执行阶段。
+    """
+    violations = []
+    for step in steps:
+        for label, compiler in (
+            ("action", compile_step_action),
+            ("rollback", compile_rollback_action),
+        ):
+            try:
+                compiler(step)
+            except ActionDSLValidationError as exc:
+                violations.append(GuardrailViolation(
+                    rule_id="ACTION_DSL_001",
+                    severity="critical",
+                    step_id=step.get("step_id"),
+                    message=f"结构化{label}不在白名单中",
+                    detail=f"步骤 {step.get('step_id', '?')} {label}: {exc}",
                 ))
     return violations
 
@@ -272,6 +342,7 @@ def run_guardrail(fix_plan: dict) -> GuardrailResult:
     all_violations = []
 
     # 依次执行 4 条规则
+    all_violations.extend(check_action_dsl_allowed(steps))
     all_violations.extend(check_dangerous_commands(steps))
     all_violations.extend(check_rollback_completeness(steps))
     all_violations.extend(check_step_order(steps))

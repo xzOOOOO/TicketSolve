@@ -35,6 +35,17 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from action_dsl import (
+    ActionDSLValidationError,
+    CompiledAction,
+    HTTP_PROBE_URLS,
+    LAB_FAULTS,
+    ORDERS_INDEX_SQL,
+    RESTARTABLE_CONTAINERS,
+    STARTABLE_CONTAINERS,
+    compile_rollback_action,
+    compile_step_action,
+)
 from schemas import CommandExecutionResult, ErrorAnalysisOutput
 from logger import logger
 
@@ -49,6 +60,84 @@ def _is_effective_command(command: Optional[str]) -> bool:
         return False
     normalized = command.strip().lower()
     return normalized not in {"", "n/a", "na", "none", "null", "无", "无需回滚", "不需要"}
+
+
+def _resolve_step_command(step: dict) -> tuple[str, Optional[CompiledAction]]:
+    """
+    解析修复步骤中的执行命令。
+
+    优先使用结构化动作 DSL（action_type + target），由本地编译器生成安全命令。
+    如果步骤没有定义结构化动作，则回退到兼容模式，使用 step["command"] 自由文本命令。
+
+    参数：
+        step: 修复步骤字典
+
+    返回：
+        (command, compiled_action): 实际要执行的命令字符串，以及编译后的动作对象（如果有）
+    """
+    compiled = compile_step_action(step)
+    if compiled:
+        return compiled.command, compiled
+    return step.get("command", "") or "", None
+
+
+def _resolve_rollback_command(step: dict) -> tuple[str, Optional[CompiledAction]]:
+    """
+    解析修复步骤中的回滚命令。
+
+    优先使用结构化回滚动作（rollback_action_type + rollback_target），由本地编译器生成。
+    如果步骤没有定义结构化回滚动作，则回退到兼容模式，使用 step["rollback_command"] 自由文本命令。
+
+    参数：
+        step: 修复步骤字典
+
+    返回：
+        (command, compiled_action): 回滚命令字符串，以及编译后的回滚动作对象（如果有）
+    """
+    compiled = compile_rollback_action(step)
+    if compiled:
+        return compiled.command, compiled
+    return step.get("rollback_command", "") or "", None
+
+
+def _safe_command_for_log(step: dict) -> str:
+    """
+    获取用于日志展示的命令字符串。
+
+    优先尝试解析结构化动作，如果 DSL 校验失败则回退到原始 command 字段。
+    这个函数不会抛出异常，确保日志记录不会中断。
+    """
+    try:
+        command, _ = _resolve_step_command(step)
+        return command
+    except ActionDSLValidationError:
+        return step.get("command", "") or ""
+
+
+def _compiled_action_fields(compiled: Optional[CompiledAction]) -> dict:
+    """
+    将编译后的动作对象转换为字典字段，用于写入执行轨迹。
+
+    这些字段用于追溯：该命令是从哪个 action_type 和 target 编译出来的。
+    """
+    if not compiled:
+        return {}
+    return {
+        "compiled_from_action_dsl": True,
+        "action_type": compiled.action_type,
+        "target": compiled.target,
+    }
+
+
+def _compiled_action_from_trace(trace: list[dict]) -> Optional[CompiledAction]:
+    for item in trace:
+        if item.get("compiled_from_action_dsl"):
+            return CompiledAction(
+                action_type=item.get("action_type", ""),
+                target=item.get("target", ""),
+                command=item.get("command", ""),
+            )
+    return None
 
 
 # ============================================================
@@ -269,37 +358,25 @@ class SafeDockerCommandRunner(CommandRunner):
     """
 
     _ALLOWED_LAB_FAULTS = {
-        "DB_CONN_FAIL",
-        "APP_PROCESS_DOWN",
-        "REDIS_DOWN",
-        "NGINX_BAD_ROUTE",
-        "DB_SLOW_QUERY",
+        *LAB_FAULTS,
     }
 
     _ALLOWED_DOCKER_COMMANDS = {
-        ("docker", "start", "srebench-postgres"),
-        ("docker", "start", "srebench-app"),
-        ("docker", "start", "srebench-redis"),
-        ("docker", "restart", "srebench-nginx"),
+        *(("docker", "start", container) for container in STARTABLE_CONTAINERS),
+        *(("docker", "restart", container) for container in RESTARTABLE_CONTAINERS),
     }
 
     _ALLOWED_CONTAINERS = {
-        "srebench-postgres",
-        "srebench-app",
-        "srebench-redis",
-        "srebench-nginx",
+        *STARTABLE_CONTAINERS,
+        *RESTARTABLE_CONTAINERS,
     }
 
     _ALLOWED_HTTP_URLS = {
-        "http://localhost:18080/health",
-        "http://localhost:18081/health",
-        "http://localhost:18080/cache/ping",
-        "http://localhost:18080/orders/pending",
+        *HTTP_PROBE_URLS,
     }
 
     _ALLOWED_INDEX_SQL = (
-        "create index if not exists idx_orders_status_created_at "
-        "on orders (status, created_at desc)"
+        ORDERS_INDEX_SQL.rstrip(";")
     )
 
     async def run(self, command: str, step_id: int, timeout: int = 30) -> CommandExecutionResult:
@@ -659,8 +736,7 @@ class ClosedLoopExecutor:
 
         for step in steps:
             step_id = step.get("step_id", 0)
-            command = step.get("command", "")
-            rollback_command = step.get("rollback_command", "")
+            command = _safe_command_for_log(step)
 
             # 闭环执行单步（含重试和 LLM 决策）
             step_result, step_trace = await self._execute_step_with_retry(
@@ -671,30 +747,53 @@ class ClosedLoopExecutor:
             execution_trace.extend(step_trace)
 
             if step_result.success:
-                executed_steps.append({
+                executed_step = {
                     "step_id": step_id,
                     "action": step.get("action", ""),
-                    "command": command,
+                    "command": step_result.command or command,
                     "status": "success",
                     "exit_code": step_result.exit_code,
                     "stdout": step_result.stdout,
                     "stderr": step_result.stderr,
                     "attempts": len([t for t in step_trace if t.get("trace_type") == "execute"]),
+                }
+                executed_step.update(_compiled_action_fields(_compiled_action_from_trace(step_trace)))
+                executed_steps.append({
+                    **executed_step,
                 })
             else:
                 # 步骤彻底失败，尝试回滚
                 overall_status = "failed"
-                executed_steps.append({
+                failed_step = {
                     "step_id": step_id,
                     "action": step.get("action", ""),
-                    "command": command,
+                    "command": step_result.command or command,
                     "status": "failed",
                     "exit_code": step_result.exit_code,
                     "stdout": step_result.stdout,
                     "stderr": step_result.stderr,
-                })
+                }
+                failed_step.update(_compiled_action_fields(_compiled_action_from_trace(step_trace)))
+                executed_steps.append(failed_step)
 
                 # 执行回滚
+                rollback_invalid = False
+                try:
+                    rollback_command, rollback_action = _resolve_rollback_command(step)
+                except ActionDSLValidationError as exc:
+                    rollback_command = ""
+                    rollback_action = None
+                    rollback_invalid = True
+                    execution_trace.append({
+                        "trace_type": "rollback",
+                        "step_id": step_id,
+                        "exit_code": 126,
+                        "success": False,
+                        "stdout": "",
+                        "stderr": f"Invalid rollback action DSL: {exc}",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+
                 if _is_effective_command(rollback_command):
                     logger.info(f"[ClosedLoopExecutor] 步骤 {step_id} 失败，执行回滚: {rollback_command}")
                     rollback_result = await self.runner.run(rollback_command, step_id=-step_id)
@@ -707,8 +806,9 @@ class ClosedLoopExecutor:
                         "stdout": rollback_result.stdout,
                         "stderr": rollback_result.stderr,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
+                        **_compiled_action_fields(rollback_action),
                     })
-                    executed_steps.append({
+                    rollback_step = {
                         "step_id": step_id,
                         "action": f"回滚步骤 {step_id}",
                         "command": rollback_command,
@@ -716,8 +816,10 @@ class ClosedLoopExecutor:
                         "exit_code": rollback_result.exit_code,
                         "stdout": rollback_result.stdout,
                         "stderr": rollback_result.stderr,
-                    })
-                else:
+                    }
+                    rollback_step.update(_compiled_action_fields(rollback_action))
+                    executed_steps.append(rollback_step)
+                elif not rollback_invalid:
                     logger.warning(f"[ClosedLoopExecutor] 步骤 {step_id} 失败且无回滚命令")
                     execution_trace.append({
                         "trace_type": "rollback_skipped",
@@ -774,8 +876,33 @@ class ClosedLoopExecutor:
             (最终执行结果, 执行轨迹列表)
         """
         step_id = step.get("step_id", 0)
-        command = step.get("command", "")
         trace = []
+        try:
+            command, compiled_action = _resolve_step_command(step)
+        except ActionDSLValidationError as exc:
+            result = CommandExecutionResult(
+                step_id=step_id,
+                command=step.get("command", "") or "",
+                exit_code=126,
+                stdout="",
+                stderr=f"Invalid action DSL: {exc}",
+                success=False,
+                execution_time_ms=0,
+            )
+            trace.append({
+                "trace_type": "execute",
+                "step_id": step_id,
+                "attempt": 1,
+                "command": result.command,
+                "exit_code": result.exit_code,
+                "success": result.success,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "invalid_action_dsl": True,
+            })
+            return result, trace
+
         current_command = command
 
         for attempt in range(1, self.max_retries + 1):
@@ -797,6 +924,7 @@ class ClosedLoopExecutor:
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                **_compiled_action_fields(compiled_action),
             })
 
             if result.success:
@@ -833,6 +961,16 @@ class ClosedLoopExecutor:
                     logger.info(f"[ClosedLoopExecutor] LLM 决策: 重试步骤 {step_id}")
                     continue
                 elif decision.action == "adjust" and decision.adjusted_command:
+                    if compiled_action:
+                        # 关键安全设计：如果当前步骤使用了结构化动作 DSL（action_type + target），
+                        # 则忽略 LLM 调整后的自由文本命令，继续重试本地编译的白名单命令。
+                        # 这防止了 LLM 通过 "adjust" 决策绕过 DSL 安全限制。
+                        logger.info(
+                            f"[ClosedLoopExecutor] 结构化动作步骤 {step_id} 忽略 LLM 调整命令，"
+                            "继续重试已编译的白名单命令"
+                        )
+                        continue
+                    # 兼容旧模式：没有结构化动作时，允许 LLM 调整自由文本命令
                     logger.info(
                         f"[ClosedLoopExecutor] LLM 决策: 调整命令 "
                         f"{current_command[:50]} → {decision.adjusted_command[:50]}"

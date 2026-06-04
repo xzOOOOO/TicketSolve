@@ -79,14 +79,29 @@ class FixStepOutput(BaseModel):
     FixPlanOutput 的嵌套子模型，描述单个修复步骤的详细信息。
     比 state.py 中的 FixStep 多了 expected_output/on_failure/rollback_command 三个必填字段，
     因为 LLM 生成方案时这些字段都有具体值。
+
+    结构化动作 DSL 字段说明（安全执行的核心）：
+    - action_type + target: LLM 声明"想做什么 + 作用在哪"，由 action_dsl.py 编译成安全命令
+    - command: 兼容旧模式的自由文本命令，存在结构化动作时仅用于展示/日志
+    - rollback_action_type + rollback_target: 结构化回滚动作，同样由 action_dsl.py 编译
+    - rollback_command: 兼容旧模式的回滚命令
+
+    执行优先级：action_type + target > command（自由文本）
+    这是安全设计：LLM 无法通过 command 字段注入任意 shell 命令。
     """
-    step_id: int = Field(description="步骤编号")
-    action: str = Field(description="具体动作描述")
-    command: str = Field(description="可直接执行的完整命令")
+    step_id: int = Field(description="步骤编号，必须是纯数字如 1/2/3")
+    action: str = Field(description="具体动作描述（人可读）")
+    action_type: Optional[str] = Field(None, description="结构化动作类型，如 RECOVER_FAULT/START_CONTAINER/HTTP_PROBE 等；优先于 command 执行")
+    target: Optional[str] = Field(None, description="结构化动作目标，如 APP_PROCESS_DOWN/srebench-app 等；与 action_type 配合由本地编译器生成安全命令")
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="结构化动作可选参数（预留扩展）")
+    command: Optional[str] = Field(None, description="兼容旧方案的完整命令字符串；当存在 action_type + target 时，此字段仅用于展示和日志，不会被执行")
     risk_level: str = Field(default="low", description="风险等级: low/medium/high")
-    expected_output: str = Field(description="预期输出")
-    on_failure: str = Field(description="失败时的处理方式")
-    rollback_command: str = Field(description="回滚命令")
+    expected_output: str = Field(description="预期输出（用于验证步骤是否成功）")
+    on_failure: str = Field(description="失败时的处理方式描述")
+    rollback_action_type: Optional[str] = Field(None, description="结构化回滚动作类型，与 action_type 对称；用于执行失败时自动回滚")
+    rollback_target: Optional[str] = Field(None, description="结构化回滚动作目标，与 target 对称")
+    rollback_parameters: Dict[str, Any] = Field(default_factory=dict, description="结构化回滚动作可选参数（预留扩展）")
+    rollback_command: Optional[str] = Field(None, description="兼容旧方案的回滚命令字符串；存在结构化回滚动作时仅用于展示")
 
 
 class VerificationOutput(BaseModel):

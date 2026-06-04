@@ -64,6 +64,24 @@ python server.py
 - `docker restart srebench-nginx`
 - `docker exec srebench-postgres psql -U labuser -d labdb -c "create index if not exists idx_orders_status_created_at on orders (status, created_at desc);"`
 
+修复步骤也可以使用结构化 Action DSL。Executor 会根据 `action_type + target`
+编译成上述白名单命令，存在结构化动作时不依赖 LLM 生成的自由文本 `command`：
+
+```json
+{
+  "action_type": "RECOVER_FAULT",
+  "target": "APP_PROCESS_DOWN",
+  "command": "python lab/chaos.py recover APP_PROCESS_DOWN"
+}
+```
+
+```json
+{
+  "action_type": "START_CONTAINER",
+  "target": "srebench-app"
+}
+```
+
 不在白名单里的命令会被拒绝，返回 `exit_code=126`。
 
 ## 评测
