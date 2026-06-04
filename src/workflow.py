@@ -2,7 +2,7 @@
 LangGraph 工作流定义 - Multi-Agent 架构
 
 工作流结构:
-    Supervisor → Dispatch(并行派发) → DynamicCheck → [有协作请求?]
+    CaseMemory → Supervisor → Dispatch(并行派发) → DynamicCheck → [有协作请求?]
                                                     ├─ 是 → Dispatch(追加派发) → DynamicCheck → ...
                                                     └─ 否 → Aggregate(聚合推理) → Fix → RepairPlanner → Guardrail → [通过?]
                                                                                               ├─ 是 → Human Approval → Executor(闭环) → Replanner → Verify/Retry/Re-diagnose/Save
@@ -12,6 +12,7 @@ LangGraph 工作流定义 - Multi-Agent 架构
 
 核心改造:
 - Supervisor 替代原 Router，支持并行派发多个 Agent
+- CaseMemory 检索历史相似案例，供 Supervisor/FixAgent 复用
 - Dispatch 节点并行执行被派发的 Agent
 - DynamicCheck 节点扫描 Agent 间 request_help 消息，动态追加派发
 - Aggregate 节点综合多个 Agent 的诊断结果
@@ -51,6 +52,7 @@ from agents import (
     CommunicationBus,
 )
 from nodes import (
+    create_case_memory_node,
     create_dispatch_node,
     create_dynamic_check_node,
     create_aggregate_node,
@@ -125,16 +127,17 @@ async def create_async_workflow(llm, checkpointer=None):
     创建 Multi-Agent 异步工作流
 
     流程:
-    1. Supervisor 分析症状，决定派发哪些 Agent
-    2. Dispatch 并行执行被派发的 Agent
-    3. Aggregate 综合各 Agent 诊断结果
-    4. Fix Agent 生成修复方案
-    5. RepairPlanner 规范化修复计划
-    6. Human Approval 人工审批
-    7. Executor 执行修复
-    8. Replanner/Critic 判定执行结果并决策下一步
-    9. Verify 验证恢复
-    10. Save 保存工单
+    1. CaseMemory 检索历史相似案例
+    2. Supervisor 分析症状，决定派发哪些 Agent
+    3. Dispatch 并行执行被派发的 Agent
+    4. Aggregate 综合各 Agent 诊断结果
+    5. Fix Agent 生成修复方案
+    6. RepairPlanner 规范化修复计划
+    7. Human Approval 人工审批
+    8. Executor 执行修复
+    9. Replanner/Critic 判定执行结果并决策下一步
+    10. Verify 验证恢复
+    11. Save 保存工单
 
     MCP Client 在此处一次性初始化:
     1. 启动 MCP Server 子进程 (stdio)
@@ -178,6 +181,7 @@ async def create_async_workflow(llm, checkpointer=None):
     }
 
     # 创建工作流节点
+    case_memory_node = create_case_memory_node()
     dispatch_node = create_dispatch_node(agent_runners)
     dynamic_check_node = create_dynamic_check_node()
     aggregate_node = create_aggregate_node(llm, communication_bus)
@@ -194,6 +198,7 @@ async def create_async_workflow(llm, checkpointer=None):
     workflow = StateGraph(SystemState)
 
     # 添加节点
+    workflow.add_node("case_memory", case_memory_node)
     workflow.add_node("supervisor", supervisor_agent.run)
     workflow.add_node("dispatch", dispatch_node)
     workflow.add_node("dynamic_check", dynamic_check_node)
@@ -209,7 +214,10 @@ async def create_async_workflow(llm, checkpointer=None):
     workflow.add_node("other_handler", other_handler_node)
 
     # 设置入口
-    workflow.set_entry_point("supervisor")
+    workflow.set_entry_point("case_memory")
+
+    # CaseMemory → Supervisor
+    workflow.add_edge("case_memory", "supervisor")
 
     # Supervisor → 有Agent派发则走dispatch，否则走other_handler
     workflow.add_conditional_edges(

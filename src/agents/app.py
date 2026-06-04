@@ -5,6 +5,8 @@ from agents.communication import CommunicationBus
 from state import SystemState
 from prompts import APP_PROMPT, APP_DIAGNOSIS_PROMPT
 from schemas import DiagnosisOutput
+# 引入标准化 Trace 事件工厂，用于生成统一的追踪事件
+from trace_events import make_trace_event
 from logger import logger
 from config import settings
 
@@ -36,6 +38,14 @@ class AppAgent(BaseAgent):
         3. 使用 Structured Output 调用 LLM 生成诊断结论
         4. 广播诊断结果，向需要协作的 Agent 发送求助消息
         """
+        # 初始化 Trace 事件列表，首先记录 agent_started 事件
+        trace_events = [make_trace_event(
+            "agent_started",
+            ticket_id=state.ticket_id,
+            agent_name=self.name,
+            input_data={"symptom": state.symptom},
+            metadata={"dispatch_round": state.dispatch_round},
+        )]
         try:
             logger.info(f"[{self.name}] 开始诊断: symptom={state.symptom[:50]}...")
 
@@ -77,6 +87,49 @@ class AppAgent(BaseAgent):
 
             # 记录审计日志：工具调用 + 诊断结论
             audit_logs = []
+            # 记录工具调用标准化 Trace 事件（如果有调用工具）
+            if tool_calls_info:
+                trace_events.append(make_trace_event(
+                    "tool_called",
+                    ticket_id=state.ticket_id,
+                    agent_name=self.name,
+                    input_data={"symptom": state.symptom, "peer_messages": peer_messages or "无"},
+                    output_data={"tool_calls": tool_calls_info},
+                    metadata={
+                        "tool_count": len(tool_calls_info),
+                        "dispatch_round": state.dispatch_round,
+                    },
+                ))
+            # 记录工具观察结果标准化 Trace 事件（如果有返回结果）
+            if tool_results:
+                trace_events.append(make_trace_event(
+                    "observation_received",
+                    ticket_id=state.ticket_id,
+                    agent_name=self.name,
+                    input_data={"tool_call_count": len(tool_calls_info)},
+                    output_data={"tool_results": tool_results},
+                    metadata={
+                        "observation_count": len(tool_results),
+                        "dispatch_round": state.dispatch_round,
+                    },
+                ))
+            # 记录诊断结论生成的标准化 Trace 事件
+            trace_events.append(make_trace_event(
+                "diagnosis_generated",
+                ticket_id=state.ticket_id,
+                agent_name=self.name,
+                input_data={
+                    "symptom": state.symptom,
+                    "tool_calls": str(tool_calls_info),
+                    "tool_results": str(tool_results),
+                    "peer_messages": peer_messages or "无",
+                },
+                output_data=result_dict,
+                metadata={
+                    "confidence": result_dict.get("confidence"),
+                    "dispatch_round": state.dispatch_round,
+                },
+            ))
 
             # 1. 记录工具调用
             if tool_calls_info:
@@ -117,8 +170,17 @@ class AppAgent(BaseAgent):
             })
 
             # 3. 记录协作请求（如果有）
+            # 记录向其他 Agent 请求协作的标准化 Trace 事件
             for target in result_dict.get("need_collaboration", []):
                 if target in _VALID_AGENTS and target != self.name:
+                    trace_events.append(make_trace_event(
+                        "handoff_requested",
+                        ticket_id=state.ticket_id,
+                        agent_name=self.name,
+                        input_data={"diagnosis": result_dict.get("diagnosis")},
+                        output_data={"target_agent": target, "request_sent": True},
+                        metadata={"dispatch_round": state.dispatch_round},
+                    ))
                     audit_logs.append({
                         "ticket_id": state.ticket_id,
                         "agent_name": self.name,
@@ -138,6 +200,7 @@ class AppAgent(BaseAgent):
                 "app_agent_result": {**result_dict, "tool_results": tool_results},
                 "messages": [f"App Agent (MCP): {result_dict.get('diagnosis')}"],
                 "audit_logs": audit_logs,
+                "trace_events": trace_events,
             }
 
             # 通过通信总线发送消息
@@ -170,8 +233,20 @@ class AppAgent(BaseAgent):
 
             return update
         except Exception as e:
+            # Agent 异常时也要记录 failure 状态的 Trace 事件，保证失败路径可追溯
             logger.exception(f"[{self.name}] 执行失败: {e}")
+            trace_events.append(make_trace_event(
+                "diagnosis_generated",
+                ticket_id=state.ticket_id,
+                agent_name=self.name,
+                status="failure",
+                input_data={"symptom": state.symptom},
+                error=str(e),
+                metadata={"dispatch_round": state.dispatch_round},
+            ))
             return {
                 "app_agent_result": {"diagnosis": "诊断失败", "possible_causes": [str(e)]},
                 "messages": [f"App Agent: 诊断失败 - {str(e)}"],
+                # 异常路径也要返回 trace_events，避免前面已记录的事件丢失
+                "trace_events": trace_events,
             }

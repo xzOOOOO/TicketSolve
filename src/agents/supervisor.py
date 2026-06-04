@@ -3,6 +3,8 @@ from agents.base import BaseAgent
 from state import SystemState
 from prompts import SUPERVISOR_PROMPT
 from schemas import SupervisorDecisionOutput
+# 引入标准化 Trace 事件工厂，用于生成统一的追踪事件
+from trace_events import make_trace_event
 from logger import logger
 from config import settings
 
@@ -33,13 +35,30 @@ class SupervisorAgent(BaseAgent):
         4. 过滤无效的 Agent 名称
         5. 返回状态更新字典
         """
+        # 初始化 Trace 事件列表，首先记录 agent_started 事件
+        trace_events = [make_trace_event(
+            "agent_started",
+            ticket_id=state.ticket_id,
+            agent_name=self.name,
+            input_data={
+                "symptom": state.symptom,
+                "case_context": state.case_context,
+            },
+            metadata={
+                "dispatch_round": state.dispatch_round,
+                "similar_case_ids": [case.get("case_id") for case in state.similar_cases],
+            },
+        )]
         try:
             logger.info(f"[{self.name}] 开始分析: symptom={state.symptom[:50]}...")
 
             # 使用 Structured Output 调用 LLM，直接返回 SupervisorDecisionOutput 对象
             # 无需再手动解析 JSON 字符串
             result = await self._chain.ainvoke(
-                {"symptom": state.symptom}
+                {
+                    "symptom": state.symptom,
+                    "case_context": state.case_context or "无相似历史案例。",
+                }
             )
 
             # 兜底：极少数情况下 with_structured_output 可能返回 None
@@ -99,10 +118,41 @@ class SupervisorAgent(BaseAgent):
                     "dispatched_agents": dispatch,
                     "reasoning": reasoning,
                 },
-                "input_context": {"symptom": state.symptom},
+                "input_context": {
+                    "symptom": state.symptom,
+                    "case_context": state.case_context,
+                    "similar_case_ids": [case.get("case_id") for case in state.similar_cases],
+                },
                 "output_result": result_dict,
                 "dispatch_round": state.dispatch_round,
             }
+            # 生成诊断完成和交接请求的标准化 Trace 事件
+            trace_events.extend([
+                make_trace_event(
+                    "diagnosis_generated",
+                    ticket_id=state.ticket_id,
+                    agent_name=self.name,
+                    input_data={"symptom": state.symptom},
+                    output_data=result_dict,
+                    metadata={
+                        "diagnosis_type": diagnosis_type,
+                        "urgency": urgency,
+                        "dispatch_round": state.dispatch_round,
+                    },
+                ),
+                make_trace_event(
+                    "handoff_requested",
+                    ticket_id=state.ticket_id,
+                    agent_name=self.name,
+                    status="success" if dispatch else "skipped",
+                    input_data={"diagnosis_type": diagnosis_type},
+                    output_data={"dispatched_agents": dispatch, "reasoning": reasoning},
+                    metadata={
+                        "handoff_count": len(dispatch),
+                        "dispatch_round": state.dispatch_round,
+                    },
+                ),
+            ])
 
             return {
                 "diagnosis_type": diagnosis_type,
@@ -114,13 +164,26 @@ class SupervisorAgent(BaseAgent):
                     f"派发={dispatch}"
                 ],
                 "audit_logs": [audit_log],
+                "trace_events": trace_events,
             }
         except Exception as e:
+            # Supervisor 异常时也要记录 failure 状态的 Trace 事件，保证失败路径可追溯
             logger.exception(f"[{self.name}] 执行失败: {e}")
+            trace_events.append(make_trace_event(
+                "diagnosis_generated",
+                ticket_id=state.ticket_id,
+                agent_name=self.name,
+                status="failure",
+                input_data={"symptom": state.symptom},
+                error=str(e),
+                metadata={"dispatch_round": state.dispatch_round},
+            ))
             return {
                 "diagnosis_type": "other",
                 "urgency": "medium",
                 "supervisor_decision": {},
                 "dispatched_agents": [],
                 "messages": ["Supervisor: 分析失败，使用默认值"],
+                # 异常路径也要返回 trace_events，避免前面已记录的事件丢失
+                "trace_events": trace_events,
             }

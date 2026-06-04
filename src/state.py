@@ -83,6 +83,12 @@ class SystemState(BaseModel):
     ticket_id: str = Field(..., description="工单ID")
     symptom: str = Field(..., description="故障现象描述")
 
+    # ========== Agent Memory / Case Library ==========
+    # 案例库相关字段：检索历史相似案例，供 Supervisor 和 FixAgent 复用经验
+    similar_cases: List[Dict[str, Any]] = Field(default_factory=list, description="相似历史案例")
+    case_context: str = Field("无相似历史案例。", description="给 Supervisor/FixAgent 使用的案例上下文")
+    case_memory: Optional[Dict[str, Any]] = Field(None, description="案例库检索元数据")
+
     # ========== Supervisor 决策 ==========
     diagnosis_type: Optional[DiagnosisType] = Field(None, description="诊断类型: app/db/net/other")
     urgency: Optional[Urgency] = Field(None, description="紧急程度: low/medium/high/critical")
@@ -139,6 +145,14 @@ class SystemState(BaseModel):
     audit_logs: Annotated[List[Dict[str, Any]], operator.add] = Field(
         default_factory=list,
         description="Agent 操作审计日志，用于追溯工单处理流程"
+    )
+
+    # ========== Standard Trace Events ==========
+    # 标准化 Trace 事件列表，LangGraph 节点返回的 trace_events 会通过 operator.add 自动累加到这里
+    # 用于评测、前端可视化、单步分析等场景
+    trace_events: Annotated[List[Dict[str, Any]], operator.add] = Field(
+        default_factory=list,
+        description="标准 Trace 事件，用于评测和单步流程分析"
     )
 
     # ========== 辅助字段 ==========

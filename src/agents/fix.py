@@ -3,6 +3,8 @@ from agents.base import BaseAgent
 from state import SystemState
 from prompts import FIX_PROMPT
 from schemas import FixPlanOutput
+# 引入标准化 Trace 事件工厂，用于生成统一的追踪事件
+from trace_events import make_trace_event
 from logger import logger
 from config import settings
 
@@ -41,6 +43,17 @@ class FixAgent(BaseAgent):
         2. 使用 Structured Output 调用 LLM 生成修复方案
         3. 返回包含 fix_plan 的状态更新字典
         """
+        # 初始化 Trace 事件列表，首先记录 agent_started 事件
+        trace_events = [make_trace_event(
+            "agent_started",
+            ticket_id=state.ticket_id,
+            agent_name=self.name,
+            input_data={"diagnosis_type": state.diagnosis_type},
+            metadata={
+                "dispatch_round": state.dispatch_round,
+                "similar_case_ids": [case.get("case_id") for case in state.similar_cases],
+            },
+        )]
         try:
             diagnosis_type = state.diagnosis_type
 
@@ -64,6 +77,7 @@ class FixAgent(BaseAgent):
             result = await self._chain.ainvoke({
                 "diagnosis_type": diagnosis_type,
                 "diagnosis_result": str(diagnosis_result),
+                "case_context": state.case_context or "无相似历史案例。",
             })
 
             # 兜底处理
@@ -93,10 +107,30 @@ class FixAgent(BaseAgent):
                 "input_context": {
                     "diagnosis_type": diagnosis_type,
                     "diagnosis_result": str(diagnosis_result),
+                    "case_context": state.case_context,
+                    "similar_case_ids": [case.get("case_id") for case in state.similar_cases],
                 },
                 "output_result": result_dict,
                 "dispatch_round": state.dispatch_round,
             }
+            # 记录修复方案生成的标准化 Trace 事件，附带 plan_id、risk_level、steps_count 等元数据
+            trace_events.append(make_trace_event(
+                "plan_generated",
+                ticket_id=state.ticket_id,
+                agent_name=self.name,
+                input_data={
+                    "diagnosis_type": diagnosis_type,
+                    "diagnosis_result": str(diagnosis_result),
+                    "case_context": state.case_context,
+                },
+                output_data=result_dict,
+                metadata={
+                    "plan_id": result_dict.get("plan_id"),
+                    "risk_level": result_dict.get("risk_level"),
+                    "steps_count": len(result_dict.get("steps", [])),
+                    "dispatch_round": state.dispatch_round,
+                },
+            ))
 
             return {
                 "fix_plan": result_dict,
@@ -105,10 +139,23 @@ class FixAgent(BaseAgent):
                     f"风险等级: {result_dict.get('risk_level')}"
                 ],
                 "audit_logs": [audit_log],
+                "trace_events": trace_events,
             }
         except Exception as e:
+            # FixAgent 异常时也要记录 failure 状态的 Trace 事件，保证失败路径可追溯
             logger.exception(f"[{self.name}] 执行失败: {e}")
+            trace_events.append(make_trace_event(
+                "plan_generated",
+                ticket_id=state.ticket_id,
+                agent_name=self.name,
+                status="failure",
+                output_data=_DEFAULT_FIX_PLAN.copy(),
+                error=str(e),
+                metadata={"dispatch_round": state.dispatch_round},
+            ))
             return {
                 "fix_plan": _DEFAULT_FIX_PLAN.copy(),
                 "messages": [f"Fix Agent: 方案生成失败 - {str(e)}"],
+                # 异常路径也要返回 trace_events，避免前面已记录的事件丢失
+                "trace_events": trace_events,
             }

@@ -108,6 +108,53 @@ python server.py
 - `rollback`：Executor 已执行回滚，停止继续修复并保存当前状态
 - `escalate`：重规划预算耗尽或权限/高风险失败，保存并交由人工处理
 
+工作流入口前还有 CaseMemory 节点，会从 `eval/case_library.json` 检索相似历史案例，
+并将压缩后的 `case_context` 提供给 Supervisor 和 FixAgent。案例字段包括：
+
+- `symptoms`
+- `tool_evidence`
+- `root_cause`
+- `successful_repair_action`
+- `verification`
+
+如果本次工单最终 `verified=true`，Save 节点会把它沉淀回案例库，后续新工单可复用。
+
+## 标准化 Trace
+
+系统仍保留原有 `audit_logs` 作为人工审计日志，同时新增 `trace_events` 作为标准事件流，方便 eval 分析每一步成功/失败。事件会在保存工单时写入 `execution_result.trace_events`，`/api/tickets/{ticket_id}/agent-flow` 也会返回 `standard_trace`。
+
+标准事件名固定为：
+
+```text
+agent_started
+tool_called
+observation_received
+diagnosis_generated
+handoff_requested
+plan_generated
+policy_checked
+approval_received
+action_executed
+verification_passed
+```
+
+每条事件使用统一字段：
+
+```json
+{
+  "schema_version": "trace.v1",
+  "event_type": "action_executed",
+  "ticket_id": "TKT-001",
+  "agent_name": "executor",
+  "status": "success",
+  "timestamp": "2026-06-04T00:00:00+00:00",
+  "input": {},
+  "output": {},
+  "error": null,
+  "metadata": {}
+}
+```
+
 ## 评测
 
 先启动主工单 API：

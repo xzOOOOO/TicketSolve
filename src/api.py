@@ -164,6 +164,10 @@ async def get_ticket_agent_flow(ticket_id: str, db: AsyncSession = Depends(get_d
     for name in agent_summary:
         agent_summary[name]["dispatch_rounds"] = sorted(agent_summary[name]["dispatch_rounds"])
 
+    # 从 execution_result 中提取标准化 Trace 事件，供外部评测/可视化使用
+    execution_result = ticket.execution_result or {}
+    standard_trace = execution_result.get("trace_events", []) if isinstance(execution_result, dict) else []
+
     return APIResponse(
         code=200,
         message="查询成功",
@@ -176,6 +180,10 @@ async def get_ticket_agent_flow(ticket_id: str, db: AsyncSession = Depends(get_d
             "agent_summary": agent_summary,
             "flow_steps": flow,
             "total_steps": len(flow),
+            # 标准化 Trace 事件流：每个事件包含 event_type、status、input、output、metadata 等
+            "standard_trace": standard_trace,
+            # Trace 事件总数，方便前端快速展示
+            "trace_event_count": len(standard_trace),
         },
     )
 

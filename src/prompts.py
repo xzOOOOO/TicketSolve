@@ -147,7 +147,7 @@ FIX_PROMPT = ChatPromptTemplate.from_messages([
 - steps: 修复步骤列表，每个步骤只使用平铺 Action DSL 字段，包含 step_id(步骤编号，必须是纯数字如 1/2/3，不要带前缀如 STEP-01)、action(动作描述)、action_type(结构化动作类型)、target(动作目标)、parameters(可选参数对象)、command(可选兼容展示命令)、risk_level(风险等级)、expected_output(预期输出)、on_failure(失败处理)、rollback_action_type(可选结构化回滚动作类型)、rollback_target(可选结构化回滚目标)、rollback_parameters(可选回滚参数对象)、rollback_command(可选兼容回滚命令)
 - verification: 验证方法，包含 commands(验证命令列表) 和 expected_result(预期结果)
 - estimated_time: 预计执行时间"""),
-    ("human", "诊断类型：{diagnosis_type}\n\n诊断结果：{diagnosis_result}\n\n请生成修复方案。")
+    ("human", "诊断类型：{diagnosis_type}\n\n诊断结果：{diagnosis_result}\n\n历史相似案例：\n{case_context}\n\n请生成修复方案。")
 ])
 
 SUPERVISOR_PROMPT = ChatPromptTemplate.from_messages([
@@ -171,6 +171,9 @@ SUPERVISOR_PROMPT = ChatPromptTemplate.from_messages([
 - critical: 完全不可用，立即处理
 
 请分析故障现象并给出调度决策。
+
+历史相似案例（仅作经验参考，不能替代当前诊断）：
+{case_context}
 
 字段说明：
 - diagnosis_type: 诊断类型(app/db/net/other)

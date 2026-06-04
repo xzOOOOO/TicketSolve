@@ -100,9 +100,23 @@ def serialize_value(value):
     return value
 
 
+def _has_execution_payload(execution_result: dict | None) -> bool:
+    """判断 execution_result 是否包含真正的执行结果（而非只有 trace_events）。
+
+    关键作用：避免 execution_result 里只有 trace_events 时被误判为 completed。
+    例如执行器还没真正跑，只记录了 trace，这时候不应该把工单状态设为已完成。
+    """
+    if not execution_result:
+        return False
+    if isinstance(execution_result, dict):
+        # 字典里除了 trace_events 还有其他字段，才算有真正的执行结果
+        return any(key != "trace_events" for key in execution_result)
+    return True
+
+
 def _resolve_ticket_status(state: dict, execution_result: dict | None) -> str:
     approval_status = serialize_value(state.get("approval_status"))
-    if execution_result:
+    if _has_execution_payload(execution_result):
         return TicketStatus.COMPLETED
     if approval_status == "approved":
         return TicketStatus.APPROVED
@@ -133,6 +147,12 @@ async def save_ticket(db: AsyncSession, state: dict):
             if not isinstance(execution_result, dict):
                 execution_result = {}
             execution_result = {**execution_result, **verification_result}
+        # 将标准化 Trace 事件保存到 execution_result.trace_events 中，方便持久化和接口查询
+        trace_events = serialize_value(state.get("trace_events", []))
+        if trace_events:
+            if not isinstance(execution_result, dict):
+                execution_result = {}
+            execution_result = {**execution_result, "trace_events": trace_events}
         messages = serialize_value(state.get("messages", []))
 
         if ticket:

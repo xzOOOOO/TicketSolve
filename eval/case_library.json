@@ -1,0 +1,256 @@
+[
+  {
+    "case_id": "srebench:DB_CONN_FAIL",
+    "title": "Postgres connection failure",
+    "symptoms": [
+      "数据库连接失败",
+      "应用健康检查失败，数据库不可连接",
+      "DB_CONN_FAIL"
+    ],
+    "tool_evidence": [
+      "check_db_connection: postgres container or TCP probe failed",
+      "check_app_health: health endpoint reports database unavailable"
+    ],
+    "root_cause": "PostgreSQL 容器停止或连接不可用，导致应用无法连接数据库。",
+    "possible_causes": [
+      "postgres container down",
+      "database TCP port unavailable"
+    ],
+    "successful_repair_action": {
+      "action_type": "RECOVER_FAULT",
+      "target": "DB_CONN_FAIL",
+      "command": "python lab/chaos.py recover DB_CONN_FAIL"
+    },
+    "verification": {
+      "commands": [
+        "curl http://localhost:18080/health"
+      ],
+      "expected_result": "health endpoint returns HTTP 2xx"
+    },
+    "created_at": "2026-06-04T00:00:00+00:00",
+    "updated_at": "2026-06-04T00:00:00+00:00"
+  },
+  {
+    "case_id": "srebench:APP_PROCESS_DOWN",
+    "title": "Application process down",
+    "symptoms": [
+      "应用进程宕机",
+      "health endpoint connection refused",
+      "APP_PROCESS_DOWN"
+    ],
+    "tool_evidence": [
+      "check_app_process: app container or process is not running",
+      "check_app_health: app health endpoint fails"
+    ],
+    "root_cause": "应用容器或 FastAPI 进程停止，入口健康检查不可用。",
+    "possible_causes": [
+      "app process down",
+      "srebench-app container stopped"
+    ],
+    "successful_repair_action": {
+      "action_type": "RECOVER_FAULT",
+      "target": "APP_PROCESS_DOWN",
+      "command": "python lab/chaos.py recover APP_PROCESS_DOWN"
+    },
+    "verification": {
+      "commands": [
+        "curl http://localhost:18080/health",
+        "curl http://localhost:18081/health"
+      ],
+      "expected_result": "nginx and direct app health endpoints return HTTP 2xx"
+    },
+    "created_at": "2026-06-04T00:00:00+00:00",
+    "updated_at": "2026-06-04T00:00:00+00:00"
+  },
+  {
+    "case_id": "srebench:REDIS_DOWN",
+    "title": "Redis cache down",
+    "symptoms": [
+      "缓存接口失败",
+      "Redis 连接失败",
+      "REDIS_DOWN"
+    ],
+    "tool_evidence": [
+      "check_app_redis_connection: redis container or TCP probe failed",
+      "cache endpoint failed"
+    ],
+    "root_cause": "Redis 容器停止或缓存端口不可达，导致 /cache/ping 失败。",
+    "possible_causes": [
+      "redis container down",
+      "cache dependency unavailable"
+    ],
+    "successful_repair_action": {
+      "action_type": "RECOVER_FAULT",
+      "target": "REDIS_DOWN",
+      "command": "python lab/chaos.py recover REDIS_DOWN"
+    },
+    "verification": {
+      "commands": [
+        "curl http://localhost:18080/cache/ping",
+        "curl http://localhost:18080/health"
+      ],
+      "expected_result": "cache ping and health endpoints return HTTP 2xx"
+    },
+    "created_at": "2026-06-04T00:00:00+00:00",
+    "updated_at": "2026-06-04T00:00:00+00:00"
+  },
+  {
+    "case_id": "srebench:NGINX_BAD_ROUTE",
+    "title": "Nginx bad route",
+    "symptoms": [
+      "nginx 路由错误",
+      "入口健康检查失败但直连应用正常",
+      "NGINX_BAD_ROUTE"
+    ],
+    "tool_evidence": [
+      "check_network_http_route: direct app health is ok but nginx route failed",
+      "check_app_health: direct app endpoint healthy"
+    ],
+    "root_cause": "Nginx 路由配置错误，入口转发到错误 upstream 或路径。",
+    "possible_causes": [
+      "nginx route misconfiguration",
+      "bad reverse proxy route"
+    ],
+    "successful_repair_action": {
+      "action_type": "RECOVER_FAULT",
+      "target": "NGINX_BAD_ROUTE",
+      "command": "python lab/chaos.py recover NGINX_BAD_ROUTE"
+    },
+    "verification": {
+      "commands": [
+        "curl http://localhost:18080/health",
+        "curl http://localhost:18081/health"
+      ],
+      "expected_result": "nginx entry and direct app health endpoints are both healthy"
+    },
+    "created_at": "2026-06-04T00:00:00+00:00",
+    "updated_at": "2026-06-04T00:00:00+00:00"
+  },
+  {
+    "case_id": "srebench:DB_SLOW_QUERY",
+    "title": "Orders pending slow query",
+    "symptoms": [
+      "订单查询很慢",
+      "pending orders endpoint slow",
+      "DB_SLOW_QUERY"
+    ],
+    "tool_evidence": [
+      "check_db_slow_query: idx_orders_status_created_at is missing",
+      "pending-orders endpoint is slow"
+    ],
+    "root_cause": "orders(status, created_at desc) 索引缺失，导致 pending orders 查询变慢。",
+    "possible_causes": [
+      "missing index idx_orders_status_created_at",
+      "slow database query"
+    ],
+    "successful_repair_action": {
+      "action_type": "REBUILD_ORDERS_INDEX",
+      "target": "DB_SLOW_QUERY",
+      "command": "docker exec srebench-postgres psql -U labuser -d labdb -c \"create index if not exists idx_orders_status_created_at on orders (status, created_at desc);\""
+    },
+    "verification": {
+      "commands": [
+        "curl http://localhost:18080/orders/pending",
+        "curl http://localhost:18080/health"
+      ],
+      "expected_result": "orders pending endpoint returns quickly with HTTP 2xx"
+    },
+    "created_at": "2026-06-04T00:00:00+00:00",
+    "updated_at": "2026-06-04T00:00:00+00:00"
+  },
+  {
+    "case_id": "ticket:TKT-013",
+    "title": "Resolved ticket TKT-013",
+    "symptoms": [
+      "数据查不出来"
+    ],
+    "tool_evidence": [
+      "check_db_connection: [{'type': 'text', 'text': '{\"tool\": \"check_db_connection\", \"status\": \"ok\", \"container\": {\"container\": \"srebench-postgres\", \"exists\": true, \"status\": \"running\", \"running\": true, \"exit_code\": 0, \"error\": \"\"}, \"tcp_probe\": {\"target\": \"localhost:15432\", \"status\": \"reachable\", \"latency_ms\": 9}, \"query_result\": [[1]], \"evidence\": [\"postgres container, port and query are healthy\"], \"suggested_domain\": \"db_agent\", \"timestamp\": 1780591496.527}', 'id': 'lc_b81dab8f-fe9f-40f5-8928-107563c0f18c'}]",
+      "check_db_slow_query: [{'type': 'text', 'text': '{\"tool\": \"check_db_slow_query\", \"status\": \"ok\", \"index_exists\": true, \"http_probe\": {\"url\": \"http://localhost:18080/orders/pending\", \"status\": \"ok\", \"http_status\": 200, \"elapsed_ms\": 378, \"body\": \"{\\\\\"count\\\\\":50,\\\\\"elapsed_ms\\\\\":91,\\\\\"items\\\\\":[{\\\\\"id\\\\\":5,\\\\\"status\\\\\":\\\\\"pending\\\\\",\\\\\"amount\\\\\":475.72},{\\\\\"id\\\\\":10,\\\\\"status\\\\\":\\\\\"pending\\\\\",\\\\\"amount\\\\\":467.39},{\\\\\"id\\\\\":15,\\\\\"status\\\\\":\\\\\"pending\\\\\",\\\\\"amount\\\\\":290.74},{\\\\\"id\\\\\":20,\\\\\"status\\\\\":\\\\\"pending\\\\\",\\\\\"am",
+      "check_db_deadlock: [{'type': 'text', 'text': '{\"tool\": \"check_db_deadlock\", \"status\": \"ok\", \"lock_waits\": [], \"evidence\": [\"no lock waits detected\"], \"error\": null, \"suggested_domain\": \"db_agent\", \"timestamp\": 1780591500.742}', 'id': 'lc_27d47c5c-41c9-4899-8552-ec18db920278'}]",
+      "check_app_redis_connection: [{'type': 'text', 'text': '{\"tool\": \"check_app_redis_connection\", \"status\": \"failed\", \"container\": {\"container\": \"srebench-redis\", \"exists\": true, \"status\": \"exited\", \"running\": false, \"exit_code\": 0, \"error\": \"\"}, \"tcp_probe\": {\"target\": \"localhost:16379\", \"status\": \"unreachable\", \"latency_ms\": null, \"error\": \"[WinError 10061] 由于目标计算机积极拒绝，无法连接。\"}, \"cache_endpoint_probe\": {\"url\": \"http://localhost:18080/cache/ping\", \"status\": \"failed\", \"http_status\": 503, \"elapsed_ms\": 4102, \"error\": \"Service Un",
+      "check_app_health: [{'type': 'text', 'text': '{\"tool\": \"check_app_health\", \"status\": \"ok\", \"container\": {\"container\": \"srebench-app\", \"exists\": true, \"status\": \"running\", \"running\": true, \"exit_code\": 0, \"error\": \"\"}, \"http_probe\": {\"url\": \"http://localhost:18081/health\", \"status\": \"ok\", \"http_status\": 200, \"elapsed_ms\": 4077, \"body\": \"{\\\\\"status\\\\\":\\\\\"degraded\\\\\",\\\\\"checks\\\\\":{\\\\\"db\\\\\":\\\\\"ok\\\\\",\\\\\"redis\\\\\":\\\\\"failed: Error -5 connecting to redis:6379. No address associated with hostname.\\\\\"}}\"}, \"evidence\": [\"app"
+    ],
+    "root_cause": "Redis服务容器异常退出导致缓存组件不可用，应用健康检查显示Redis连接失败且数据库正常，直接引发数据查询链路中断。",
+    "possible_causes": [
+      "Redis容器异常退出或未被正确启动",
+      "Redis容器配置错误或宿主机资源不足导致启动失败",
+      "Docker网络或DNS配置异常，导致应用无法解析Redis服务主机名",
+      "应用层未配置合理的Redis降级/回源策略，缓存不可用时直接阻断数据查询"
+    ],
+    "successful_repair_action": {
+      "step_id": 1,
+      "action": "启动异常退出的 Redis 服务容器",
+      "action_type": "START_CONTAINER",
+      "target": "srebench-redis",
+      "command": "docker start srebench-redis"
+    },
+    "successful_repair_actions": [
+      {
+        "step_id": 1,
+        "action": "启动异常退出的 Redis 服务容器",
+        "action_type": "START_CONTAINER",
+        "target": "srebench-redis",
+        "command": "docker start srebench-redis"
+      },
+      {
+        "step_id": 2,
+        "action": "验证 Redis 缓存组件连通性",
+        "action_type": "HTTP_PROBE",
+        "target": "http://localhost:18080/cache/ping",
+        "command": "curl http://localhost:18080/cache/ping"
+      },
+      {
+        "step_id": 3,
+        "action": "验证业务数据查询链路恢复",
+        "action_type": "HTTP_PROBE",
+        "target": "http://localhost:18080/orders/pending",
+        "command": "curl http://localhost:18080/orders/pending"
+      }
+    ],
+    "verification": {
+      "commands": [
+        "http://localhost:18080/health",
+        "http://localhost:18080/cache/ping",
+        "http://localhost:18080/orders/pending"
+      ],
+      "expected_result": "所有恢复探针 HTTP 2xx",
+      "probe_result": {
+        "verified": true,
+        "verification_probe": [
+          {
+            "name": "health",
+            "url": "http://localhost:18080/health",
+            "status_code": 200,
+            "success": true,
+            "body": "{\"status\":\"ok\",\"checks\":{\"db\":\"ok\",\"redis\":\"ok\"}}",
+            "error": "",
+            "checked_at": "2026-06-04T17:26:27.586079+00:00"
+          },
+          {
+            "name": "cache_ping",
+            "url": "http://localhost:18080/cache/ping",
+            "status_code": 200,
+            "success": true,
+            "body": "{\"status\":\"ok\",\"value\":\"1780593987.60788\"}",
+            "error": "",
+            "checked_at": "2026-06-04T17:26:27.586079+00:00"
+          },
+          {
+            "name": "orders_pending",
+            "url": "http://localhost:18080/orders/pending",
+            "status_code": 200,
+            "success": true,
+            "body": "{\"count\":50,\"elapsed_ms\":13,\"items\":[{\"id\":5,\"status\":\"pending\",\"amount\":475.72},{\"id\":10,\"status\":\"pending\",\"amount\":467.39},{\"id\":15,\"status\":\"pending\",\"amount\":290.74},{\"id\":20,\"status\":\"pending\",\"amount\":175.51},{\"id\":25,\"status\":\"pending\",\"amount\":117.96},{\"id\":30,\"status\":\"pending\",\"amount\":340.28},{\"id\":35,\"status\":\"pending\",\"amount\":135.63},{\"id\":40,\"status\":\"pending\",\"amount\":343.21},{\"id\":45,\"status\":\"pending\",\"amount\":421.2},{\"id\":50,\"status\":\"pending\",\"amount\":75.84},{\"id\":55,\"status\":\"pending\",\"amount\":182.29},{\"id\":60,\"status\":\"pending\",\"amount\":384.5},{\"id\":65,\"status\":\"pending\",\"amount\":387.18},{\"id\":70,\"status\":\"pending\",\"amount\":207.94},{\"id\":75,\"status\":\"pending\",\"amount\":1.89},{\"id\":80,\"status\":\"pending\",\"amount\":234.74},{\"id\":85,\"status\":\"pending\",\"amount\":296.4},{\"id\":90,\"status\":\"pending\",\"amount\":263.36},{\"id\":95,\"status\":\"pending\",\"amount\":194.84},{\"id\":100,\"status\":\"pending\",\"amount\":482.93},{\"id\":105,\"status\":\"pending\",\"amount\":18.69},{\"id\":110,\"status\":\"pend",
+            "error": "",
+            "checked_at": "2026-06-04T17:26:27.587086+00:00"
+          }
+        ],
+        "recovered_at": "2026-06-04T17:26:27.623054+00:00"
+      }
+    },
+    "source_ticket_id": "TKT-013",
+    "created_at": "2026-06-04T17:26:27.630621+00:00",
+    "updated_at": "2026-06-04T17:26:27.630621+00:00"
+  }
+]

@@ -18,8 +18,16 @@ from langgraph.errors import GraphInterrupt
 from database import AsyncSessionLocal, save_ticket
 from guardrail import run_guardrail
 from action_dsl import ActionDSLValidationError, compile_rollback_action, compile_step_action
+from case_library import (
+    DEFAULT_CASE_LIBRARY_PATH,
+    format_case_context,
+    retrieve_similar_cases,
+    upsert_case_from_state,
+)
 from executor_v2 import ClosedLoopExecutor, MockCommandRunner, SafeDockerCommandRunner
 from replanner import make_replanner_decision
+# 引入标准化 Trace 事件工厂和状态转换工具
+from trace_events import make_trace_event, status_from_success
 from logger import logger
 from config import settings
 
@@ -29,6 +37,70 @@ VERIFY_PROBES = [
     {"name": "cache_ping", "url": "http://localhost:18080/cache/ping"},
     {"name": "orders_pending", "url": "http://localhost:18080/orders/pending"},
 ]
+
+
+def create_case_memory_node(limit: int = 3):
+    """
+    创建案例记忆检索节点。
+
+    新工单进入 Supervisor 前，先用症状检索历史相似案例，并把压缩后的
+    case_context 写入 state，供 Supervisor 和 FixAgent 复用。
+    """
+
+    async def case_memory_node(state: SystemState) -> dict:
+        cases = retrieve_similar_cases(state.symptom, limit=limit)
+        case_context = format_case_context(cases)
+
+        logger.info(
+            f"[CaseMemory] 检索完成: ticket_id={state.ticket_id}, "
+            f"similar_cases={len(cases)}"
+        )
+
+        audit_log = {
+            "ticket_id": state.ticket_id,
+            "agent_name": "case_memory",
+            "action_type": "case_retrieval",
+            "action_detail": {
+                "case_count": len(cases),
+                "case_ids": [case.get("case_id") for case in cases],
+                "library_path": str(DEFAULT_CASE_LIBRARY_PATH),
+            },
+            "input_context": {
+                "symptom": state.symptom,
+            },
+            "output_result": {
+                "similar_cases": cases,
+            },
+            "dispatch_round": state.dispatch_round,
+        }
+        # 生成标准化 Trace 事件：案例检索结果作为 observation_received 记录
+        trace_event = make_trace_event(
+            "observation_received",
+            ticket_id=state.ticket_id,
+            agent_name="case_memory",
+            input_data={"symptom": state.symptom},
+            output_data={"similar_cases": cases},
+            metadata={
+                "case_count": len(cases),
+                "case_ids": [case.get("case_id") for case in cases],
+                "dispatch_round": state.dispatch_round,
+            },
+        )
+
+        return {
+            "similar_cases": cases,
+            "case_context": case_context,
+            "case_memory": {
+                "library_path": str(DEFAULT_CASE_LIBRARY_PATH),
+                "similar_case_count": len(cases),
+                "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "messages": [f"CaseMemory: 检索到 {len(cases)} 个相似历史案例"],
+            "audit_logs": [audit_log],
+            "trace_events": [trace_event],
+        }
+
+    return case_memory_node
 
 
 def create_dispatch_node(agent_runners: dict[str, Callable[[SystemState], Awaitable[dict]]]):
@@ -105,6 +177,9 @@ def create_dispatch_node(agent_runners: dict[str, Callable[[SystemState], Awaita
                         merged.setdefault("agent_messages", []).extend(value)
                     elif key == "audit_logs":
                         merged.setdefault("audit_logs", []).extend(value)
+                    # 收集各 Agent 返回的标准化 Trace 事件，通过 operator.add 自动累加到 State
+                    elif key == "trace_events":
+                        merged.setdefault("trace_events", []).extend(value)
                     else:
                         merged[key] = value
 
@@ -174,8 +249,8 @@ def create_aggregate_node(llm, communication_bus=None):
         communication_bus: CommunicationBus 实例（可选），用于读取 Agent 间通信消息
     """
     async def aggregate_node(state: SystemState) -> dict:
+        # 收集各 Agent 的诊断结果
         agent_results = {}
-
         if state.db_agent_result:
             agent_results["db_agent"] = state.db_agent_result
         if state.net_agent_result:
@@ -183,13 +258,24 @@ def create_aggregate_node(llm, communication_bus=None):
         if state.app_agent_result:
             agent_results["app_agent"] = state.app_agent_result
 
+        # 无任何诊断结果时，生成 skipped 状态的标准化 Trace 事件
         if not agent_results:
             logger.info("[Aggregate] 无 Agent 诊断结果，跳过聚合")
             return {
                 "aggregated_diagnosis": None,
+                "trace_events": [make_trace_event(
+                    "diagnosis_generated",
+                    ticket_id=state.ticket_id,
+                    agent_name="aggregate",
+                    status="skipped",
+                    input_data={"agent_result_count": 0},
+                    output_data={"aggregated_diagnosis": None},
+                    metadata={"dispatch_round": state.dispatch_round},
+                )],
                 "messages": ["Aggregate: 无诊断结果可聚合"],
             }
 
+        # 只有一个 Agent 返回结果时，直接采用，无需 LLM 聚合
         if len(agent_results) == 1:
             agent_name = list(agent_results.keys())[0]
             single_result = agent_results[agent_name]
@@ -204,9 +290,18 @@ def create_aggregate_node(llm, communication_bus=None):
             }
             return {
                 "aggregated_diagnosis": aggregated,
+                "trace_events": [make_trace_event(
+                    "diagnosis_generated",
+                    ticket_id=state.ticket_id,
+                    agent_name="aggregate",
+                    input_data={"contributing_agents": [agent_name]},
+                    output_data=aggregated,
+                    metadata={"dispatch_round": state.dispatch_round},
+                )],
                 "messages": [f"Aggregate: 采用 {agent_name} 的诊断结论"],
             }
 
+        # 多个 Agent 返回结果时，使用 LLM 进行聚合推理
         logger.info(f"[Aggregate] 聚合 {len(agent_results)} 个 Agent 的诊断结果: {list(agent_results.keys())}")
 
         try:
@@ -270,6 +365,15 @@ def create_aggregate_node(llm, communication_bus=None):
 
             return {
                 "aggregated_diagnosis": aggregated,
+                # 聚合完成，生成 diagnosis_generated 标准化 Trace 事件
+                "trace_events": [make_trace_event(
+                    "diagnosis_generated",
+                    ticket_id=state.ticket_id,
+                    agent_name="aggregate",
+                    input_data={"contributing_agents": list(agent_results.keys())},
+                    output_data=aggregated,
+                    metadata={"dispatch_round": state.dispatch_round},
+                )],
                 "messages": [
                     f"Aggregate: 综合诊断={aggregated.get('diagnosis')}, "
                     f"置信度={aggregated.get('confidence')}"
@@ -277,6 +381,7 @@ def create_aggregate_node(llm, communication_bus=None):
                 "audit_logs": [audit_log],
             }
         except Exception as e:
+            # 聚合推理异常时也要生成 failure 状态的标准化 Trace 事件
             logger.exception(f"[Aggregate] 聚合推理失败: {e}")
             return {
                 "aggregated_diagnosis": {
@@ -286,6 +391,15 @@ def create_aggregate_node(llm, communication_bus=None):
                     "contributing_agents": list(agent_results.keys()),
                     "reasoning": f"异常: {str(e)}",
                 },
+                "trace_events": [make_trace_event(
+                    "diagnosis_generated",
+                    ticket_id=state.ticket_id,
+                    agent_name="aggregate",
+                    status="failure",
+                    input_data={"contributing_agents": list(agent_results.keys())},
+                    error=str(e),
+                    metadata={"dispatch_round": state.dispatch_round},
+                )],
                 "messages": [f"Aggregate: 聚合推理失败 - {str(e)}"],
             }
 
@@ -296,36 +410,72 @@ def create_human_approval_node():
     async def human_approval_node(state: SystemState) -> dict:
         try:
             logger.info(f"审批节点: 请求审批工单 {state.ticket_id}")
+            # 从 fix_plan（可能是 dict 或 Pydantic 对象）中提取 plan_id
+            plan_id = (
+                state.fix_plan.get("plan_id")
+                if isinstance(state.fix_plan, dict)
+                else getattr(state.fix_plan, "plan_id", None)
+            )
 
+            # LangGraph interrupt：暂停工作流，等待外部人工审批输入
             approval = interrupt({
                 "type": "approval_required",
                 "ticket_id": state.ticket_id,
                 "fix_plan": state.fix_plan,
-                "message": f"请审批修复方案: {state.fix_plan.plan_id}"
+                "message": f"请审批修复方案: {plan_id}"
             })
 
             if approval.get("approved", False):
+                # 审批通过，生成 success 状态的标准化 Trace 事件
                 logger.info(f"审批节点: 工单 {state.ticket_id} 已审批通过, 备注: {approval.get('comments', '')}")
                 return {
                     "approval_status": ApprovalStatus.APPROVED,
                     "approver_comments": approval.get("comments", ""),
-                    "messages": [f"人工审批: 已批准 - {approval.get('comments', '')}"]
+                    "messages": [f"人工审批: 已批准 - {approval.get('comments', '')}"],
+                    "trace_events": [make_trace_event(
+                        "approval_received",
+                        ticket_id=state.ticket_id,
+                        agent_name="human_approval",
+                        input_data={"plan_id": plan_id},
+                        output_data={"approved": True, "comments": approval.get("comments", "")},
+                        metadata={"dispatch_round": state.dispatch_round},
+                    )],
                 }
             else:
+                # 审批拒绝，生成 failure 状态的标准化 Trace 事件
                 logger.info(f"审批节点: 工单 {state.ticket_id} 已拒绝, 备注: {approval.get('comments', '')}")
                 return {
                     "approval_status": ApprovalStatus.REJECTED,
                     "approver_comments": approval.get("comments", ""),
-                    "messages": [f"人工审批: 已拒绝 - {approval.get('comments', '')}"]
+                    "messages": [f"人工审批: 已拒绝 - {approval.get('comments', '')}"],
+                    "trace_events": [make_trace_event(
+                        "approval_received",
+                        ticket_id=state.ticket_id,
+                        agent_name="human_approval",
+                        status="failure",
+                        input_data={"plan_id": plan_id},
+                        output_data={"approved": False, "comments": approval.get("comments", "")},
+                        metadata={"dispatch_round": state.dispatch_round},
+                    )],
                 }
         except GraphInterrupt:
+            # LangGraph 中断异常需要原样抛出，不能吞掉
             raise
         except Exception as e:
+            # 审批节点异常时也要生成标准化 Trace 事件，保证失败路径可追溯
             logger.exception(f"审批节点执行失败: {e}")
             return {
                 "approval_status": ApprovalStatus.REJECTED,
                 "approver_comments": f"审批异常: {str(e)}",
-                "messages": [f"人工审批: 异常 - {str(e)}"]
+                "messages": [f"人工审批: 异常 - {str(e)}"],
+                "trace_events": [make_trace_event(
+                    "approval_received",
+                    ticket_id=state.ticket_id,
+                    agent_name="human_approval",
+                    status="failure",
+                    error=str(e),
+                    metadata={"dispatch_round": state.dispatch_round},
+                )],
             }
     return human_approval_node
 
@@ -381,7 +531,17 @@ def create_repair_planner_node():
 
         if not fix_plan:
             logger.warning("[RepairPlanner] 无修复方案，跳过规划")
-            return {"messages": ["RepairPlanner: 无修复方案，跳过"]}
+            return {
+                "messages": ["RepairPlanner: 无修复方案，跳过"],
+                "trace_events": [make_trace_event(
+                    "plan_generated",
+                    ticket_id=state.ticket_id,
+                    agent_name="repair_planner",
+                    status="skipped",
+                    output_data={"fix_plan": None},
+                    metadata={"dispatch_round": state.dispatch_round},
+                )],
+            }
 
         plan_dict = fix_plan if isinstance(fix_plan, dict) else fix_plan.model_dump()
         plan_dict = {**plan_dict}
@@ -455,6 +615,20 @@ def create_repair_planner_node():
                 f"RepairPlanner: 规划完成 - {compiled_count}/{len(planned_steps)} 个动作已编译"
             ],
             "audit_logs": [audit_log],
+            "trace_events": [make_trace_event(
+                "plan_generated",
+                ticket_id=state.ticket_id,
+                agent_name="repair_planner",
+                input_data={"source": "fix_agent", "plan_id": plan_dict.get("plan_id")},
+                output_data=plan_dict,
+                metadata={
+                    "steps_count": len(planned_steps),
+                    "compiled_actions": compiled_count,
+                    "compiled_rollbacks": rollback_compiled_count,
+                    "invalid_action_specs": invalid_count,
+                    "dispatch_round": state.dispatch_round,
+                },
+            )],
         }
 
     return repair_planner_node
@@ -519,11 +693,13 @@ def create_verify_node():
     async def verify_node(state: SystemState) -> dict:
         logger.info(f"[Verify] 开始恢复验证: ticket_id={state.ticket_id}")
 
+        # 并行探测三个恢复接口（health、cache_ping、orders_pending）
         tasks = [
             asyncio.to_thread(_run_verification_probe, probe["name"], probe["url"])
             for probe in VERIFY_PROBES
         ]
         probes = await asyncio.gather(*tasks)
+        # 所有探测都成功才算验证通过
         verified = all(probe.get("success", False) for probe in probes)
         recovered_at = datetime.now(timezone.utc).isoformat() if verified else None
 
@@ -532,6 +708,23 @@ def create_verify_node():
             "verification_probe": probes,
             "recovered_at": recovered_at,
         }
+        # 生成标准化 Trace 事件：verification_passed，状态由探测结果决定
+        trace_event = make_trace_event(
+            "verification_passed",
+            ticket_id=state.ticket_id,
+            agent_name="verify",
+            status=status_from_success(verified),
+            input_data={
+                "execution_status": (state.execution_result or {}).get("overall_status"),
+                "probe_urls": [probe["url"] for probe in VERIFY_PROBES],
+            },
+            output_data=verification_result,
+            metadata={
+                "probe_count": len(probes),
+                "passed_count": sum(1 for probe in probes if probe.get("success")),
+                "dispatch_round": state.dispatch_round,
+            },
+        )
 
         execution_result = {
             **(state.execution_result or {}),
@@ -567,6 +760,7 @@ def create_verify_node():
                 f"({sum(1 for probe in probes if probe.get('success'))}/{len(probes)})"
             ],
             "audit_logs": [audit_log],
+            "trace_events": [trace_event],
         }
 
     return verify_node
@@ -579,11 +773,49 @@ def create_save_node():
         async with AsyncSessionLocal() as db:
             try:
                 logger.info(f"[Save] 开始归档工单: ticket_id={state.ticket_id}")
-                ticket = await save_ticket(db, state.__dict__)
+                saved_case = None
+                case_audit_log = None
+                try:
+                    saved_case = upsert_case_from_state(state)
+                    if saved_case:
+                        logger.info(
+                            f"[Save] 已沉淀案例: case_id={saved_case.get('case_id')}"
+                        )
+                        case_audit_log = {
+                            "ticket_id": state.ticket_id,
+                            "agent_name": "case_memory",
+                            "action_type": "case_upsert",
+                            "action_detail": {
+                                "case_id": saved_case.get("case_id"),
+                                "library_path": str(DEFAULT_CASE_LIBRARY_PATH),
+                            },
+                            "input_context": {
+                                "verified": (state.verification_result or {}).get("verified"),
+                            },
+                            "output_result": saved_case,
+                            "dispatch_round": state.dispatch_round,
+                        }
+                except Exception as exc:
+                    logger.warning(f"[Save] 案例沉淀失败，不影响工单保存: {exc}")
+
+                state_dict = {**state.__dict__}
+                if case_audit_log:
+                    state_dict["audit_logs"] = list(state.audit_logs) + [case_audit_log]
+
+                ticket = await save_ticket(db, state_dict)
                 logger.info(f"[Save] 工单 {ticket.ticket_id} 已保存")
-                return {
-                    "messages": [f"归档: 工单 {ticket.ticket_id} 已保存"],
-                }
+                messages = [f"归档: 工单 {ticket.ticket_id} 已保存"]
+                result = {"messages": messages}
+                if saved_case:
+                    messages.append(f"CaseMemory: 已沉淀案例 {saved_case.get('case_id')}")
+                    result["case_memory"] = {
+                        **(state.case_memory or {}),
+                        "last_saved_case_id": saved_case.get("case_id"),
+                        "library_path": str(DEFAULT_CASE_LIBRARY_PATH),
+                    }
+                if case_audit_log:
+                    result["audit_logs"] = [case_audit_log]
+                return result
             except Exception as exc:
                 logger.exception(f"[Save] 归档失败: {exc}")
                 return {
@@ -639,6 +871,24 @@ def create_replanner_node():
             "messages": [
                 f"Replanner: {action} - {failure_type} - {decision.get('reason')}"
             ],
+            "trace_events": [make_trace_event(
+                "diagnosis_generated",
+                ticket_id=state.ticket_id,
+                agent_name="replanner",
+                status="success" if action == "verify" else "failure",
+                input_data={
+                    "execution_result": state.execution_result,
+                    "trace_count": len(state.execution_trace),
+                },
+                output_data=decision,
+                metadata={
+                    "decision": action,
+                    "failure_type": failure_type,
+                    "round": decision.get("replanner_round"),
+                    "max_rounds": state.max_replanner_rounds,
+                    "dispatch_round": state.dispatch_round,
+                },
+            )],
             "audit_logs": [{
                 "ticket_id": state.ticket_id,
                 "agent_name": "replanner",
@@ -696,32 +946,55 @@ def create_guardrail_node():
     async def guardrail_node(state: SystemState) -> dict:
         fix_plan = state.fix_plan
 
+        # 无修复方案时直接跳过护栏检查，生成 skipped 状态的标准化 Trace 事件
         if not fix_plan:
             logger.warning("[Guardrail] 无修复方案，跳过检查")
             return {
                 "guardrail_result": {"passed": True, "violations": [], "checked_at": ""},
+                "trace_events": [make_trace_event(
+                    "policy_checked",
+                    ticket_id=state.ticket_id,
+                    agent_name="guardrail",
+                    status="skipped",
+                    output_data={"passed": True, "violations": [], "checked_at": ""},
+                    metadata={"dispatch_round": state.dispatch_round},
+                )],
                 "messages": ["Guardrail: 无修复方案，跳过检查"],
             }
 
-        # fix_plan 可能是 FixPlan 对象或 dict
+        # fix_plan 可能是 FixPlan 对象或 dict，统一转成字典处理
         plan_dict = fix_plan if isinstance(fix_plan, dict) else fix_plan.model_dump()
 
         logger.info(f"[Guardrail] 开始检查修复方案: plan_id={plan_dict.get('plan_id')}")
 
-        # 执行确定性护栏检查
+        # 执行确定性护栏检查（非 LLM 评分，而是代码规则硬检查）
         result = run_guardrail(plan_dict)
 
         result_dict = result.model_dump()
 
         if result.passed:
+            # 护栏检查通过，生成 success 状态的标准化 Trace 事件
             logger.info(f"[Guardrail] 检查通过，方案可进入审批")
             return {
                 "guardrail_result": result_dict,
+                "trace_events": [make_trace_event(
+                    "policy_checked",
+                    ticket_id=state.ticket_id,
+                    agent_name="guardrail",
+                    status="success",
+                    input_data={"plan_id": plan_dict.get("plan_id")},
+                    output_data=result_dict,
+                    metadata={
+                        "violation_count": len(result.violations),
+                        "dispatch_round": state.dispatch_round,
+                    },
+                )],
                 "messages": [
                     f"Guardrail: 检查通过 ({len(result.violations)} 条 warning)"
                 ],
             }
         else:
+            # 护栏检查未通过，生成 failure 状态的标准化 Trace 事件，并统计 critical/warning 违规数
             violations = result_dict.get("violations", [])
             critical_violations = [v for v in violations if v.get("severity") == "critical"]
             warning_violations = [v for v in violations if v.get("severity") == "warning"]
@@ -730,6 +1003,19 @@ def create_guardrail_node():
 
             return {
                 "guardrail_result": result_dict,
+                "trace_events": [make_trace_event(
+                    "policy_checked",
+                    ticket_id=state.ticket_id,
+                    agent_name="guardrail",
+                    status="failure",
+                    input_data={"plan_id": plan_dict.get("plan_id")},
+                    output_data=result_dict,
+                    metadata={
+                        "critical_violation_count": len(critical_violations),
+                        "warning_violation_count": len(warning_violations),
+                        "dispatch_round": state.dispatch_round,
+                    },
+                )],
                 "messages": [
                     f"Guardrail: 检查未通过 - {len(critical_violations)} 条 critical, "
                     f"{len(warning_violations)} 条 warning。"
@@ -738,6 +1024,50 @@ def create_guardrail_node():
             }
 
     return guardrail_node
+
+
+def _build_action_trace_events(
+    *,
+    ticket_id: str,
+    plan_dict: dict,
+    execution_trace: list[dict],
+    dispatch_round: int,
+) -> list[dict]:
+    """将执行器的 execution_trace 逐条拆分为标准化的 action_executed 事件。
+
+    原来 execution_trace 是一个列表，retry/rollback/失败混在一起难以单步分析。
+    现在每条执行记录都变成独立事件，trace_type 标明是 execute/retry/rollback，
+    方便外部评测系统按 step_id 或 timestamp 排序后逐条分析。
+    """
+    events = []
+    for item in execution_trace:
+        # 从执行记录中提取成功标志，布尔值转标准状态字符串
+        success = item.get("success")
+        status = status_from_success(success if isinstance(success, bool) else None)
+        # trace_type 标明动作类型：execute（正常执行）、retry（重试）、rollback（回滚）
+        trace_type = item.get("trace_type", "execute")
+        events.append(make_trace_event(
+            "action_executed",
+            ticket_id=ticket_id,
+            agent_name="executor",
+            status=status,
+            input_data={
+                "plan_id": plan_dict.get("plan_id"),
+                "step_id": item.get("step_id"),
+                "command": item.get("command"),
+                "trace_type": trace_type,
+            },
+            output_data=item,
+            error=item.get("stderr") if status == "failure" else None,
+            metadata={
+                "plan_id": plan_dict.get("plan_id"),
+                "trace_type": trace_type,
+                "attempt": item.get("attempt"),
+                "dispatch_round": dispatch_round,
+            },
+            timestamp=item.get("timestamp"),
+        ))
+    return events
 
 
 def create_executor_node(llm=None):
@@ -761,16 +1091,28 @@ def create_executor_node(llm=None):
         plan_dict = fix_plan if isinstance(fix_plan, dict) else fix_plan.model_dump() if fix_plan else {}
 
         try:
+            # 无修复方案或步骤为空时，直接返回 skipped 状态的事件，避免空跑
             if not plan_dict or not plan_dict.get("steps"):
                 logger.warning("[Executor] 无修复方案或步骤为空")
+                execution_result = {
+                    "plan_id": plan_dict.get("plan_id"),
+                    "executed_steps": [],
+                    "overall_status": "skipped",
+                    "summary": "无修复方案或步骤为空",
+                }
                 return {
-                    "execution_result": {
-                        "plan_id": plan_dict.get("plan_id"),
-                        "executed_steps": [],
-                        "overall_status": "skipped",
-                        "summary": "无修复方案或步骤为空",
-                    },
+                    "execution_result": execution_result,
                     "messages": ["Executor: 无修复方案可执行"],
+                    # 生成标准化 Trace 事件：无方案可执行，标记为 skipped
+                    "trace_events": [make_trace_event(
+                        "action_executed",
+                        ticket_id=state.ticket_id,
+                        agent_name="executor",
+                        status="skipped",
+                        input_data={"plan_id": plan_dict.get("plan_id")},
+                        output_data=execution_result,
+                        metadata={"dispatch_round": state.dispatch_round},
+                    )],
                 }
 
             logger.info(
@@ -835,6 +1177,13 @@ def create_executor_node(llm=None):
             return {
                 "execution_result": execution_result,
                 "execution_trace": execution_trace,
+                # 将闭环执行器的 trace 逐条拆分为标准化 action_executed 事件
+                "trace_events": _build_action_trace_events(
+                    ticket_id=state.ticket_id,
+                    plan_dict=plan_dict,
+                    execution_trace=execution_trace,
+                    dispatch_round=state.dispatch_round,
+                ),
                 "messages": [
                     f"Executor: 执行{execution_result.get('overall_status', 'unknown')} - "
                     f"{execution_result.get('completed_steps', 0)}/{execution_result.get('total_steps', 0)} 步骤完成 "
@@ -843,15 +1192,27 @@ def create_executor_node(llm=None):
                 "audit_logs": [audit_log],
             }
         except Exception as e:
+            # 执行器异常时也要生成标准化 Trace 事件，保证失败路径可追溯
             logger.exception(f"[Executor] 执行失败: {e}")
+            execution_result = {
+                "plan_id": plan_dict.get("plan_id") if plan_dict else None,
+                "executed_steps": [],
+                "overall_status": "failed",
+                "summary": f"执行异常: {str(e)}",
+            }
             return {
-                "execution_result": {
-                    "plan_id": plan_dict.get("plan_id") if plan_dict else None,
-                    "executed_steps": [],
-                    "overall_status": "failed",
-                    "summary": f"执行异常: {str(e)}",
-                },
+                "execution_result": execution_result,
                 "messages": [f"Executor: 执行失败 - {str(e)}"],
+                "trace_events": [make_trace_event(
+                    "action_executed",
+                    ticket_id=state.ticket_id,
+                    agent_name="executor",
+                    status="failure",
+                    input_data={"plan_id": plan_dict.get("plan_id") if plan_dict else None},
+                    output_data=execution_result,
+                    error=str(e),
+                    metadata={"dispatch_round": state.dispatch_round},
+                )],
             }
 
     return executor_node
