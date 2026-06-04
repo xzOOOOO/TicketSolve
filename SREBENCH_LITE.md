@@ -84,6 +84,22 @@ python server.py
 
 不在白名单里的命令会被拒绝，返回 `exit_code=126`。
 
+执行完成后，工作流会进入 Verify 节点，依次探测：
+
+- `curl http://localhost:18080/health`
+- `curl http://localhost:18080/cache/ping`
+- `curl http://localhost:18080/orders/pending`
+
+验证结果会写入 `execution_result`：
+
+```json
+{
+  "verified": true,
+  "verification_probe": [],
+  "recovered_at": "2026-06-04T00:00:00+00:00"
+}
+```
+
 ## 评测
 
 先启动主工单 API：

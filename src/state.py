@@ -121,6 +121,9 @@ class SystemState(BaseModel):
         description="闭环执行器轨迹：每一步的执行结果、LLM决策、重试/回滚记录"
     )
 
+    # ========== 恢复验证 ==========
+    verification_result: Optional[Dict[str, Any]] = Field(None, description="恢复验证结果")
+
     # ========== 审计日志（用于可追溯性） ==========
     audit_logs: Annotated[List[Dict[str, Any]], operator.add] = Field(
         default_factory=list,

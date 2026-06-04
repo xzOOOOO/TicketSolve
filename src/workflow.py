@@ -5,7 +5,7 @@ LangGraph 工作流定义 - Multi-Agent 架构
     Supervisor → Dispatch(并行派发) → DynamicCheck → [有协作请求?]
                                                     ├─ 是 → Dispatch(追加派发) → DynamicCheck → ...
                                                     └─ 否 → Aggregate(聚合推理) → Fix → RepairPlanner → Guardrail → [通过?]
-                                                                                              ├─ 是 → Human Approval → Executor(闭环)
+                                                                                              ├─ 是 → Human Approval → Executor(闭环) → Verify → Save
                                                                                               └─ 否 → END(方案被拦截)
                     ↓ (other/无Agent)
                 Other Handler → END
@@ -20,6 +20,8 @@ LangGraph 工作流定义 - Multi-Agent 架构
 - Agent 间通过 CommunicationBus 通信
 - Guardrail 确定性安全护栏：用代码规则约束 LLM 输出边界
 - Executor 闭环执行器：Observe → Decide → Act 循环
+- Verify 恢复验证节点：探测 /health、/cache/ping、/orders/pending
+- Save 统一归档节点：执行和验证完成后保存工单
 
 MCP集成说明:
 - 使用 langchain-mcp-adapters 的 MultiServerMCPClient
@@ -55,6 +57,8 @@ from nodes import (
     create_guardrail_node,
     create_human_approval_node,
     create_executor_node,
+    create_verify_node,
+    create_save_node,
     create_other_handler_node,
 )
 from logger import logger
@@ -114,6 +118,8 @@ async def create_async_workflow(llm, checkpointer=None):
     5. RepairPlanner 规范化修复计划
     6. Human Approval 人工审批
     7. Executor 执行修复
+    8. Verify 验证恢复
+    9. Save 保存工单
 
     MCP Client 在此处一次性初始化:
     1. 启动 MCP Server 子进程 (stdio)
@@ -164,6 +170,8 @@ async def create_async_workflow(llm, checkpointer=None):
     guardrail_node = create_guardrail_node()
     human_approval_node = create_human_approval_node()
     executor_node = create_executor_node(llm)  # 闭环执行器，传入 LLM 用于错误分析
+    verify_node = create_verify_node()
+    save_node = create_save_node()
     other_handler_node = create_other_handler_node()
 
     # 构建状态图
@@ -179,6 +187,8 @@ async def create_async_workflow(llm, checkpointer=None):
     workflow.add_node("guardrail", guardrail_node)
     workflow.add_node("human_approval", human_approval_node)
     workflow.add_node("execute", executor_node)
+    workflow.add_node("verify", verify_node)
+    workflow.add_node("save", save_node)
     workflow.add_node("other_handler", other_handler_node)
 
     # 设置入口
@@ -220,8 +230,10 @@ async def create_async_workflow(llm, checkpointer=None):
         {"execute": "execute", END: END},
     )
 
-    # 执行完成 → 结束
-    workflow.add_edge("execute", END)
+    # 执行完成 → 验证恢复 → 保存工单 → 结束
+    workflow.add_edge("execute", "verify")
+    workflow.add_edge("verify", "save")
+    workflow.add_edge("save", END)
     workflow.add_edge("other_handler", END)
 
     # 编译工作流（带检查点）

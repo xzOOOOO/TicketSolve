@@ -99,6 +99,17 @@ def serialize_value(value):
         return {k: serialize_value(v) for k, v in value.items()}
     return value
 
+
+def _resolve_ticket_status(state: dict, execution_result: dict | None) -> str:
+    approval_status = serialize_value(state.get("approval_status"))
+    if execution_result:
+        return TicketStatus.COMPLETED
+    if approval_status == "approved":
+        return TicketStatus.APPROVED
+    if approval_status == "rejected":
+        return TicketStatus.REJECTED
+    return TicketStatus.PENDING
+
 async def save_ticket(db: AsyncSession, state: dict):
     """保存工单到数据库
 
@@ -117,6 +128,11 @@ async def save_ticket(db: AsyncSession, state: dict):
         diagnosis_result = state.get("db_agent_result") or state.get("net_agent_result") or state.get("app_agent_result")
         fix_plan = serialize_value(state.get("fix_plan"))
         execution_result = serialize_value(state.get("execution_result"))
+        verification_result = serialize_value(state.get("verification_result"))
+        if verification_result:
+            if not isinstance(execution_result, dict):
+                execution_result = {}
+            execution_result = {**execution_result, **verification_result}
         messages = serialize_value(state.get("messages", []))
 
         if ticket:
@@ -130,13 +146,11 @@ async def save_ticket(db: AsyncSession, state: dict):
             ticket.approver_comments = state.get("approver_comments")
             ticket.execution_result = execution_result
             ticket.messages = messages
-
-            if state.get("approval_status") == "approved":
-                ticket.status = TicketStatus.APPROVED
-                logger.info(f"工单已审批通过: ticket_id={ticket_id}")
-            elif state.get("execution_result"):
-                ticket.status = TicketStatus.COMPLETED
+            ticket.status = _resolve_ticket_status(state, execution_result)
+            if ticket.status == TicketStatus.COMPLETED:
                 logger.info(f"工单执行完成: ticket_id={ticket_id}")
+            elif ticket.status == TicketStatus.APPROVED:
+                logger.info(f"工单已审批通过: ticket_id={ticket_id}")
             ticket.updated_at = datetime.utcnow()
         else:
             logger.debug(f"创建新工单: ticket_id={ticket_id}")
@@ -145,7 +159,7 @@ async def save_ticket(db: AsyncSession, state: dict):
                 symptom=state["symptom"],
                 diagnosis_type=serialize_value(state.get("diagnosis_type")),
                 urgency=serialize_value(state.get("urgency")),
-                status=TicketStatus.PENDING,
+                status=_resolve_ticket_status(state, execution_result),
                 diagnosis_result=serialize_value(diagnosis_result),
                 fix_plan=fix_plan,
                 approval_status=serialize_value(state.get("approval_status")),

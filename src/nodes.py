@@ -7,6 +7,9 @@ Agent 类（DBAgent/NetAgent/AppAgent/SupervisorAgent/FixAgent）在 agents/ 目
 
 import asyncio
 from typing import Callable, Awaitable
+from datetime import datetime, timezone
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from state import SystemState, ApprovalStatus
 from prompts import AGGREGATE_PROMPT, ERROR_ANALYSIS_PROMPT
 from schemas import AggregateOutput
@@ -18,6 +21,13 @@ from action_dsl import ActionDSLValidationError, compile_rollback_action, compil
 from executor_v2 import ClosedLoopExecutor, MockCommandRunner, SafeDockerCommandRunner
 from logger import logger
 from config import settings
+
+
+VERIFY_PROBES = [
+    {"name": "health", "url": "http://localhost:18080/health"},
+    {"name": "cache_ping", "url": "http://localhost:18080/cache/ping"},
+    {"name": "orders_pending", "url": "http://localhost:18080/orders/pending"},
+]
 
 
 def create_dispatch_node(agent_runners: dict[str, Callable[[SystemState], Awaitable[dict]]]):
@@ -449,6 +459,142 @@ def create_repair_planner_node():
     return repair_planner_node
 
 
+def _run_verification_probe(name: str, url: str, timeout: int = 5) -> dict:
+    started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        req = Request(url, method="GET")
+        with urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            return {
+                "name": name,
+                "url": url,
+                "status_code": resp.status,
+                "success": 200 <= resp.status < 300,
+                "body": body[:1000],
+                "error": "",
+                "checked_at": started_at,
+            }
+    except HTTPError as exc:
+        return {
+            "name": name,
+            "url": url,
+            "status_code": exc.code,
+            "success": False,
+            "body": "",
+            "error": f"HTTP {exc.code}: {exc.reason}",
+            "checked_at": started_at,
+        }
+    except URLError as exc:
+        return {
+            "name": name,
+            "url": url,
+            "status_code": None,
+            "success": False,
+            "body": "",
+            "error": str(exc.reason),
+            "checked_at": started_at,
+        }
+    except Exception as exc:
+        return {
+            "name": name,
+            "url": url,
+            "status_code": None,
+            "success": False,
+            "body": "",
+            "error": str(exc),
+            "checked_at": started_at,
+        }
+
+
+def create_verify_node():
+    """
+    创建恢复验证节点。
+
+    Verify 位于 Executor 之后、Save 之前，固定探测 SREBench Lite 的三个
+    关键恢复接口，并把结果写入 verification_result，同时合并进
+    execution_result，方便现有工单表持久化。
+    """
+
+    async def verify_node(state: SystemState) -> dict:
+        logger.info(f"[Verify] 开始恢复验证: ticket_id={state.ticket_id}")
+
+        tasks = [
+            asyncio.to_thread(_run_verification_probe, probe["name"], probe["url"])
+            for probe in VERIFY_PROBES
+        ]
+        probes = await asyncio.gather(*tasks)
+        verified = all(probe.get("success", False) for probe in probes)
+        recovered_at = datetime.now(timezone.utc).isoformat() if verified else None
+
+        verification_result = {
+            "verified": verified,
+            "verification_probe": probes,
+            "recovered_at": recovered_at,
+        }
+
+        execution_result = {
+            **(state.execution_result or {}),
+            **verification_result,
+        }
+
+        audit_log = {
+            "ticket_id": state.ticket_id,
+            "agent_name": "verify",
+            "action_type": "verify",
+            "action_detail": {
+                "verified": verified,
+                "probe_count": len(probes),
+                "recovered_at": recovered_at,
+            },
+            "input_context": {
+                "execution_status": (state.execution_result or {}).get("overall_status"),
+            },
+            "output_result": verification_result,
+            "dispatch_round": state.dispatch_round,
+        }
+
+        logger.info(
+            f"[Verify] 恢复验证完成: verified={verified}, "
+            f"passed={sum(1 for probe in probes if probe.get('success'))}/{len(probes)}"
+        )
+
+        return {
+            "verification_result": verification_result,
+            "execution_result": execution_result,
+            "messages": [
+                f"Verify: 恢复验证{'通过' if verified else '未通过'} "
+                f"({sum(1 for probe in probes if probe.get('success'))}/{len(probes)})"
+            ],
+            "audit_logs": [audit_log],
+        }
+
+    return verify_node
+
+
+def create_save_node():
+    """创建统一归档节点。"""
+
+    async def save_node(state: SystemState) -> dict:
+        async with AsyncSessionLocal() as db:
+            try:
+                logger.info(f"[Save] 开始归档工单: ticket_id={state.ticket_id}")
+                ticket = await save_ticket(db, state.__dict__)
+                logger.info(f"[Save] 工单 {ticket.ticket_id} 已保存")
+                return {
+                    "messages": [f"归档: 工单 {ticket.ticket_id} 已保存"],
+                }
+            except Exception as exc:
+                logger.exception(f"[Save] 归档失败: {exc}")
+                return {
+                    "messages": [f"归档: 保存工单失败 - {str(exc)}"],
+                }
+            finally:
+                await db.close()
+                logger.debug("[Save] 数据库会话已关闭")
+
+    return save_node
+
+
 def create_guardrail_node():
     """
     创建安全护栏节点
@@ -527,113 +673,101 @@ def create_executor_node(llm=None):
     - EXECUTOR_MODE=docker_lab: 使用 SafeDockerCommandRunner 执行靶场白名单命令
     """
     async def executor_node(state: SystemState) -> dict:
-        async with AsyncSessionLocal() as db:
-            try:
-                fix_plan = state.fix_plan
-                plan_dict = fix_plan if isinstance(fix_plan, dict) else fix_plan.model_dump() if fix_plan else {}
+        fix_plan = state.fix_plan
+        plan_dict = fix_plan if isinstance(fix_plan, dict) else fix_plan.model_dump() if fix_plan else {}
 
-                if not plan_dict or not plan_dict.get("steps"):
-                    logger.warning("[Executor] 无修复方案或步骤为空")
-                    return {
-                        "execution_result": {
-                            "plan_id": plan_dict.get("plan_id"),
-                            "executed_steps": [],
-                            "overall_status": "skipped",
-                            "summary": "无修复方案或步骤为空",
-                        },
-                        "messages": ["Executor: 无修复方案可执行"],
-                    }
-
-                logger.info(
-                    f"[Executor] 开始闭环执行: plan_id={plan_dict.get('plan_id')}, "
-                    f"共 {len(plan_dict.get('steps', []))} 个步骤"
-                )
-
-                # 创建闭环执行器。默认仍使用 mock，只有显式配置 docker_lab 才真实执行。
-                executor_mode = settings.EXECUTOR_MODE.lower()
-                if executor_mode == "docker_lab":
-                    runner = SafeDockerCommandRunner()
-                else:
-                    runner = MockCommandRunner(failure_rate=0.15)
-
-                logger.info(f"[Executor] 执行器模式: {executor_mode}")
-                executor = ClosedLoopExecutor(
-                    command_runner=runner,
-                    llm=llm,
-                    max_retries_per_step=2,
-                )
-
-                # 构建错误分析链（如果有 LLM）
-                error_analyzer = None
-                if llm:
-                    from schemas import ErrorAnalysisOutput
-
-                    structured_llm = llm.with_structured_output(ErrorAnalysisOutput)
-                    error_analyzer = ERROR_ANALYSIS_PROMPT | structured_llm
-
-                # 执行修复方案（闭环）
-                exec_output = await executor.execute_plan(
-                    fix_plan=plan_dict,
-                    error_analyzer=error_analyzer,
-                )
-
-                execution_result = exec_output["execution_result"]
-                execution_trace = exec_output["execution_trace"]
-
-                # 记录审计日志
-                audit_log = {
-                    "ticket_id": state.ticket_id,
-                    "agent_name": "executor",
-                    "action_type": "execute",
-                    "action_detail": {
-                        "plan_id": plan_dict.get("plan_id"),
-                        "overall_status": execution_result.get("overall_status"),
-                        "completed_steps": execution_result.get("completed_steps"),
-                        "total_steps": execution_result.get("total_steps"),
-                        "trace_count": len(execution_trace),
-                        "executor_mode": executor_mode,
-                    },
-                    "input_context": {
-                        "plan_id": plan_dict.get("plan_id"),
-                        "steps_count": len(plan_dict.get("steps", [])),
-                    },
-                    "output_result": execution_result,
-                    "dispatch_round": state.dispatch_round,
-                }
-
-                result = {
-                    "execution_result": execution_result,
-                    "execution_trace": execution_trace,
-                    "messages": [
-                        f"Executor: 执行{execution_result.get('overall_status', 'unknown')} - "
-                        f"{execution_result.get('completed_steps', 0)}/{execution_result.get('total_steps', 0)} 步骤完成 "
-                        f"(mode={executor_mode})"
-                    ],
-                    "audit_logs": [audit_log],
-                }
-
-                # 保存工单
-                merged_state = {**state.__dict__, **result}
-                merged_state["messages"] = state.messages + result["messages"]
-                ticket = await save_ticket(db, merged_state)
-                result["messages"].append(f"归档: 工单 {ticket.ticket_id} 已保存")
-
-                logger.info(f"[Executor] 执行完成，工单 {ticket.ticket_id} 已保存")
-
-                return result
-            except Exception as e:
-                logger.exception(f"[Executor] 执行失败: {e}")
+        try:
+            if not plan_dict or not plan_dict.get("steps"):
+                logger.warning("[Executor] 无修复方案或步骤为空")
                 return {
                     "execution_result": {
-                        "plan_id": plan_dict.get("plan_id") if fix_plan else None,
+                        "plan_id": plan_dict.get("plan_id"),
                         "executed_steps": [],
-                        "overall_status": "failed",
-                        "summary": f"执行异常: {str(e)}",
+                        "overall_status": "skipped",
+                        "summary": "无修复方案或步骤为空",
                     },
-                    "messages": [f"Executor: 执行失败 - {str(e)}"],
+                    "messages": ["Executor: 无修复方案可执行"],
                 }
-            finally:
-                await db.close()
-                logger.debug("[Executor] 数据库会话已关闭")
+
+            logger.info(
+                f"[Executor] 开始闭环执行: plan_id={plan_dict.get('plan_id')}, "
+                f"共 {len(plan_dict.get('steps', []))} 个步骤"
+            )
+
+            # 创建闭环执行器。默认仍使用 mock，只有显式配置 docker_lab 才真实执行。
+            executor_mode = settings.EXECUTOR_MODE.lower()
+            if executor_mode == "docker_lab":
+                runner = SafeDockerCommandRunner()
+            else:
+                runner = MockCommandRunner(failure_rate=0.15)
+
+            logger.info(f"[Executor] 执行器模式: {executor_mode}")
+            executor = ClosedLoopExecutor(
+                command_runner=runner,
+                llm=llm,
+                max_retries_per_step=2,
+            )
+
+            # 构建错误分析链（如果有 LLM）
+            error_analyzer = None
+            if llm:
+                from schemas import ErrorAnalysisOutput
+
+                structured_llm = llm.with_structured_output(ErrorAnalysisOutput)
+                error_analyzer = ERROR_ANALYSIS_PROMPT | structured_llm
+
+            # 执行修复方案（闭环）
+            exec_output = await executor.execute_plan(
+                fix_plan=plan_dict,
+                error_analyzer=error_analyzer,
+            )
+
+            execution_result = exec_output["execution_result"]
+            execution_trace = exec_output["execution_trace"]
+
+            # 记录审计日志
+            audit_log = {
+                "ticket_id": state.ticket_id,
+                "agent_name": "executor",
+                "action_type": "execute",
+                "action_detail": {
+                    "plan_id": plan_dict.get("plan_id"),
+                    "overall_status": execution_result.get("overall_status"),
+                    "completed_steps": execution_result.get("completed_steps"),
+                    "total_steps": execution_result.get("total_steps"),
+                    "trace_count": len(execution_trace),
+                    "executor_mode": executor_mode,
+                },
+                "input_context": {
+                    "plan_id": plan_dict.get("plan_id"),
+                    "steps_count": len(plan_dict.get("steps", [])),
+                },
+                "output_result": execution_result,
+                "dispatch_round": state.dispatch_round,
+            }
+
+            logger.info(f"[Executor] 执行完成: plan_id={plan_dict.get('plan_id')}")
+
+            return {
+                "execution_result": execution_result,
+                "execution_trace": execution_trace,
+                "messages": [
+                    f"Executor: 执行{execution_result.get('overall_status', 'unknown')} - "
+                    f"{execution_result.get('completed_steps', 0)}/{execution_result.get('total_steps', 0)} 步骤完成 "
+                    f"(mode={executor_mode})"
+                ],
+                "audit_logs": [audit_log],
+            }
+        except Exception as e:
+            logger.exception(f"[Executor] 执行失败: {e}")
+            return {
+                "execution_result": {
+                    "plan_id": plan_dict.get("plan_id") if plan_dict else None,
+                    "executed_steps": [],
+                    "overall_status": "failed",
+                    "summary": f"执行异常: {str(e)}",
+                },
+                "messages": [f"Executor: 执行失败 - {str(e)}"],
+            }
 
     return executor_node
