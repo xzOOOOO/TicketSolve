@@ -257,6 +257,8 @@ def create_dynamic_check_node():
         already_redispatched = set(state.redispatched_request_ids or [])
         # 本轮新触发重跑的请求 ID 列表，会返回给 state 追加记录
         new_redispatched_request_ids = []
+        # coverage_trace_events：记录证据覆盖判定和定向重派发，方便 demo/前端/评测展示
+        coverage_trace_events = []
         # 是否允许继续调度（未达最大轮次）
         can_redispatch = state.dispatch_round < state.max_dispatch_rounds
 
@@ -284,6 +286,33 @@ def create_dynamic_check_node():
                             f"[DynamicCheck] 旧结果未覆盖证据请求，定向重派发: "
                             f"request={request_id} responder={agent_name}"
                         )
+                        # 生成 handoff_requested Trace 事件：记录"证据覆盖不足→定向重跑"的决策点
+                        # 这个事件对外展示为什么系统要强制某个 Agent 重新执行，方便 demo/评测复盘
+                        coverage_trace_events.append(make_trace_event(
+                            "handoff_requested",               # trace 事件类型：任务交接/重派发请求
+                            ticket_id=state.ticket_id,         # 当前工单 ID，用于关联整条工作流轨迹
+                            agent_name="dynamic_check",        # 产生该事件的节点名称
+                            status="pending",                  # 状态为 pending，表示重跑任务已发出但尚未完成
+                            input_data={
+                                "request_message": request,    # 原始证据请求消息体，包含 required_evidence/suggested_tools
+                                "cached_agent_result_exists": True,  # 标记该 Agent 已有缓存结果（不是首次执行）
+                            },
+                            output_data={
+                                "target_agent": agent_name,    # 被强制重跑的目标 Agent
+                                "forced_redispatch": True,     # 标记这是一次"强制重跑"（非普通调度）
+                            },
+                            metadata={
+                                "dispatch_round": state.dispatch_round,        # 当前调度轮次，用于追踪循环深度
+                                "message_id": request_id,                      # 证据请求的唯一消息 ID
+                                "correlation_id": request.get("correlation_id"),  # 关联 ID，串联请求-响应链路
+                                "msg_type": request.get("msg_type"),           # 消息类型，这里是 evidence_request
+                                "target_agent": agent_name,                    # 目标 Agent（冗余字段，方便过滤）
+                                "coverage": False,                             # 核心字段：证据未覆盖请求要求
+                                "forced_redispatch": True,                     # 与 output_data 一致，方便元数据查询
+                                "required_evidence": request.get("required_evidence", []),  # 请求方要求的证据项列表
+                                "suggested_tools": request.get("suggested_tools", []),      # 请求方建议使用的工具列表
+                            },
+                        ))
                         continue
 
                     # 场景 2：证据已覆盖（或无法重跑了）→ 自动生成 evidence_response
@@ -299,6 +328,31 @@ def create_dynamic_check_node():
                         f"[DynamicCheck] 自动生成证据响应: request={request.get('message_id')} "
                         f"responder={agent_name} coverage={covers_request}"
                     )
+                    # 生成 observation_received Trace 事件：记录"证据已覆盖→自动生成响应"的决策点
+                    # status 根据 covers_request 动态决定：覆盖充分为 success，覆盖不足为 failure
+                    coverage_trace_events.append(make_trace_event(
+                        "observation_received",            # trace 事件类型：观测到 Agent 输出/响应
+                        ticket_id=state.ticket_id,         # 当前工单 ID，用于关联整条工作流轨迹
+                        agent_name="dynamic_check",        # 产生该事件的节点名称
+                        status="success" if covers_request else "failure",  # 覆盖成功标记 success，否则 failure
+                        input_data={
+                            "request_message": request,    # 原始证据请求消息体
+                            "cached_agent_result_exists": True,  # 标记该 Agent 已有缓存结果
+                        },
+                        output_data=response,              # 自动生成的 evidence_response 消息体
+                        metadata={
+                            "dispatch_round": state.dispatch_round,        # 当前调度轮次
+                            "message_id": request.get("message_id"),       # 证据请求的唯一消息 ID
+                            "correlation_id": request.get("correlation_id"),  # 关联 ID，串联请求-响应链路
+                            "msg_type": "evidence_response",               # 消息类型：自动生成的证据响应
+                            "target_agent": agent_name,                    # 响应该请求的目标 Agent
+                            "coverage": covers_request,                    # 核心字段：证据是否覆盖了请求要求
+                            "forced_redispatch": False,                    # 标记这不是重跑，而是自动响应
+                            "auto_response": True,                         # 标记该响应是 DynamicCheck 自动生成（非 Agent 实时执行）
+                            "required_evidence": request.get("required_evidence", []),  # 请求方要求的证据项列表
+                            "suggested_tools": request.get("suggested_tools", []),      # 请求方建议使用的工具列表
+                        },
+                    ))
                 else:
                     # 场景 1：Agent 还没执行过 → 追加派发
                     requested.add(agent_name)
@@ -315,6 +369,9 @@ def create_dynamic_check_node():
             if auto_responses:
                 result["agent_messages"] = auto_responses
                 result["messages"].append(f"DynamicCheck: 自动补充 {len(auto_responses)} 条证据响应")
+            # 把本轮收集到的 coverage 判定事件一并返回，通过 operator.add 累加到 state.trace_events
+            if coverage_trace_events:
+                result["trace_events"] = coverage_trace_events
             return result
 
         # 从 requested 中筛选出真正需要派发的 Agent
@@ -346,6 +403,9 @@ def create_dynamic_check_node():
             if auto_responses:
                 result["agent_messages"] = auto_responses
                 result["messages"].append(f"DynamicCheck: 自动补充 {len(auto_responses)} 条证据响应")
+            # 把本轮收集到的 coverage 判定事件一并返回，通过 operator.add 累加到 state.trace_events
+            if coverage_trace_events:
+                result["trace_events"] = coverage_trace_events
             return result
 
         # 没有任何协作请求需要处理，直接进入聚合
@@ -354,6 +414,9 @@ def create_dynamic_check_node():
         if auto_responses:
             result["agent_messages"] = auto_responses
             result["messages"].append(f"DynamicCheck: 自动补充 {len(auto_responses)} 条证据响应")
+        # 把本轮收集到的 coverage 判定事件一并返回，通过 operator.add 累加到 state.trace_events
+        if coverage_trace_events:
+            result["trace_events"] = coverage_trace_events
         return result
 
     return dynamic_check_node
@@ -565,6 +628,52 @@ def create_aggregate_node(llm, communication_bus=None):
     return aggregate_node
 
 
+async def _save_pending_approval_snapshot(state: SystemState, plan_id: str | None) -> None:
+    """保存进入人工审批前的待审批快照。
+
+    参数说明：
+    - state: 当前工作流状态，包含诊断、修复方案、审计日志和 Trace
+    - plan_id: 当前修复方案 ID，用于审批审计日志展示
+
+    返回值说明：
+    - 无
+
+    异常说明：
+    - 数据库保存失败时向上抛出异常，避免接口返回一个前端查不到的待审批工单
+    """
+    async with AsyncSessionLocal() as db:
+        # pending_audit_log：前端 Agent 流程里展示的人工审批请求节点
+        pending_audit_log = {
+            "ticket_id": state.ticket_id,
+            "agent_name": "human_approval",
+            "action_type": "approval_requested",
+            "action_detail": {
+                "plan_id": plan_id,
+                "approval_status": ApprovalStatus.PENDING,
+            },
+            "input_context": {
+                "ticket_id": state.ticket_id,
+                "fix_plan": state.fix_plan,
+            },
+            "output_result": {
+                "status": "pending",
+                "message": "等待人工审批",
+            },
+            "dispatch_round": state.dispatch_round,
+        }
+        # pending_state：保存到数据库的待审批状态快照
+        pending_state = {
+            **state.__dict__,
+            "approval_status": ApprovalStatus.PENDING,
+            "approver_comments": None,
+            "audit_logs": list(state.audit_logs) + [pending_audit_log],
+            "messages": list(state.messages) + ["人工审批: 等待审批"],
+        }
+
+        logger.info(f"审批节点: 保存待审批快照 {state.ticket_id}")
+        await save_ticket(db, pending_state)
+
+
 def create_human_approval_node():
     async def human_approval_node(state: SystemState) -> dict:
         try:
@@ -575,6 +684,8 @@ def create_human_approval_node():
                 if isinstance(state.fix_plan, dict)
                 else getattr(state.fix_plan, "plan_id", None)
             )
+
+            await _save_pending_approval_snapshot(state, plan_id)
 
             # LangGraph interrupt：暂停工作流，等待外部人工审批输入
             approval = interrupt({
@@ -587,10 +698,28 @@ def create_human_approval_node():
             if approval.get("approved", False):
                 # 审批通过，生成 success 状态的标准化 Trace 事件
                 logger.info(f"审批节点: 工单 {state.ticket_id} 已审批通过, 备注: {approval.get('comments', '')}")
+                # audit_log：记录人工审批通过动作，供前端 Agent 流程展示
+                audit_log = {
+                    "ticket_id": state.ticket_id,
+                    "agent_name": "human_approval",
+                    "action_type": "approval_approved",
+                    "action_detail": {
+                        "plan_id": plan_id,
+                        "comments": approval.get("comments", ""),
+                    },
+                    "input_context": {
+                        "approval_payload": approval,
+                    },
+                    "output_result": {
+                        "approval_status": ApprovalStatus.APPROVED,
+                    },
+                    "dispatch_round": state.dispatch_round,
+                }
                 return {
                     "approval_status": ApprovalStatus.APPROVED,
                     "approver_comments": approval.get("comments", ""),
                     "messages": [f"人工审批: 已批准 - {approval.get('comments', '')}"],
+                    "audit_logs": [audit_log],
                     "trace_events": [make_trace_event(
                         "approval_received",
                         ticket_id=state.ticket_id,
@@ -603,10 +732,28 @@ def create_human_approval_node():
             else:
                 # 审批拒绝，生成 failure 状态的标准化 Trace 事件
                 logger.info(f"审批节点: 工单 {state.ticket_id} 已拒绝, 备注: {approval.get('comments', '')}")
+                # audit_log：记录人工审批拒绝动作，供前端 Agent 流程展示
+                audit_log = {
+                    "ticket_id": state.ticket_id,
+                    "agent_name": "human_approval",
+                    "action_type": "approval_rejected",
+                    "action_detail": {
+                        "plan_id": plan_id,
+                        "comments": approval.get("comments", ""),
+                    },
+                    "input_context": {
+                        "approval_payload": approval,
+                    },
+                    "output_result": {
+                        "approval_status": ApprovalStatus.REJECTED,
+                    },
+                    "dispatch_round": state.dispatch_round,
+                }
                 return {
                     "approval_status": ApprovalStatus.REJECTED,
                     "approver_comments": approval.get("comments", ""),
                     "messages": [f"人工审批: 已拒绝 - {approval.get('comments', '')}"],
+                    "audit_logs": [audit_log],
                     "trace_events": [make_trace_event(
                         "approval_received",
                         ticket_id=state.ticket_id,

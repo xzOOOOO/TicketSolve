@@ -134,7 +134,7 @@ async def save_ticket(db: AsyncSession, state: dict):
 
     try:
         logger.info(f"开始保存工单: ticket_id={ticket_id}")
-        from sqlalchemy import select
+        from sqlalchemy import delete, select
 
         result = await db.execute(select(Ticket).filter(Ticket.ticket_id == state["ticket_id"]))
         ticket = result.scalar_one_or_none()
@@ -192,6 +192,9 @@ async def save_ticket(db: AsyncSession, state: dict):
         # 保存审计日志（如果有）
         audit_logs = state.get("audit_logs", [])
         if audit_logs:
+            # delete_stmt：同一工单按状态快照替换审计日志，避免待审批保存和最终归档重复插入
+            delete_stmt = delete(TicketAuditLog).where(TicketAuditLog.ticket_id == ticket_id)
+            await db.execute(delete_stmt)
             logger.info(f"保存 {len(audit_logs)} 条审计日志: ticket_id={ticket_id}")
             for log_entry in audit_logs:
                 log_entry["ticket_id"] = ticket_id

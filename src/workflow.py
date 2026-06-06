@@ -83,10 +83,10 @@ def route_after_dynamic_check(state: SystemState) -> str:
 
 
 def route_by_approval(state: SystemState) -> str:
-    """审批后路由：批准则执行，否则结束"""
+    """审批后路由：批准则执行，拒绝则保存审批结果"""
     if state.approval_status == ApprovalStatus.APPROVED:
         return "execute"
-    return END
+    return "save"
 
 
 def route_after_guardrail(state: SystemState) -> str:
@@ -248,11 +248,11 @@ async def create_async_workflow(llm, checkpointer=None):
         {"human_approval": "human_approval", END: END},
     )
 
-    # 审批后路由：批准则执行，否则结束
+    # 审批后路由：批准则执行，拒绝则保存审批结果
     workflow.add_conditional_edges(
         "human_approval",
         route_by_approval,
-        {"execute": "execute", END: END},
+        {"execute": "execute", "save": "save"},
     )
 
     # 执行完成 → Replanner 判定 → 验证/重试/重诊断/保存

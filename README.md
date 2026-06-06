@@ -23,6 +23,63 @@
 - **持久化存储**：PostgreSQL 数据库实现工单全生命周期管理
 - **RESTful API**：基于 FastAPI 提供标准化接口，支持 Swagger 文档
 
+## 简历展示 Demo
+
+推荐用 `NGINX_BAD_ROUTE` 作为面试展示用例，因为它能同时体现“多 Agent 协作、证据覆盖调度、安全执行、恢复验证”：
+
+```text
+注入 NGINX_BAD_ROUTE
+→ Supervisor 派发 app_agent / net_agent
+→ app_agent 发现应用直连健康，发布 hypothesis
+→ app_agent 请求 net_agent 提供 nginx route status / direct app health
+→ DynamicCheck 发现旧 net_agent 结果只包含 ping，不覆盖证据请求
+→ DynamicCheck 触发 targeted re-dispatch，强制 net_agent 重跑 route 工具
+→ net_agent 返回 check_network_http_route 结构化证据
+→ Aggregate 根据 hypothesis_scores 选择 NGINX_BAD_ROUTE
+→ FixAgent 生成 Action DSL
+→ Guardrail 校验通过
+→ Executor 在 Docker Lab 中恢复 Nginx 配置
+→ Verify 探测 /health 返回 200
+```
+
+生成一份不依赖 LLM/Docker 的展示轨迹：
+
+```bash
+python eval/demo_trace.py --json-out eval/demo_trace_nginx_bad_route.json
+```
+
+样例文件：[eval/demo_trace_nginx_bad_route.json](eval/demo_trace_nginx_bad_route.json)
+
+重点字段：
+
+```json
+{
+  "event_type": "handoff_requested",
+  "agent_name": "dynamic_check",
+  "metadata": {
+    "coverage": false,
+    "forced_redispatch": true,
+    "required_evidence": ["nginx route status", "direct app health"],
+    "suggested_tools": ["check_network_http_route"]
+  }
+}
+```
+
+这条 trace 用来展示系统“不是缓存里有 Agent 结果就糊一个响应”，而是先做 evidence coverage 判定；旧证据不覆盖请求时，会定向重跑目标 Agent。
+
+## 沙盒与安全边界
+
+本项目没有让 LLM 直接执行任意 shell。修复执行链路被限制在以下边界内：
+
+- LLM 只能生成结构化 Action DSL，例如 `{"action_type": "RECOVER_FAULT", "target": "NGINX_BAD_ROUTE"}`
+- `RepairPlanner` 将修复计划规范化为平铺 Action DSL
+- `Guardrail` 对 Action DSL 做确定性规则校验，拒绝危险动作和未知目标
+- `Executor` 在 `docker_lab` 模式下只执行白名单命令
+- 命令作用域限制在 `srebench-*` 容器、`lab/chaos.py` 故障注入/恢复和健康探测 URL
+- 自由文本 `command` 只用于展示和日志；存在 `action_type + target` 时，以本地编译后的安全命令为准
+
+这套边界适合简历项目的 SRE 靶场：既能展示真实闭环，又不会把工程量拖进完整虚拟化沙盒。
+
 ## 技术栈
 
 ### 核心框架
@@ -471,6 +528,13 @@ TicketSolve/
 │   │   ├── app.py             # 应用诊断 Agent
 │   │   ├── fix.py             # 修复方案生成 Agent
 │   │   └── communication.py   # Agent 间通信总线
+│   ├── agent_protocol/        # 多 Agent 证据协作协议
+│   │   ├── messages.py        # hypothesis/evidence_request/response 构造
+│   │   ├── coordination.py    # pending request、自动响应
+│   │   ├── coverage.py        # evidence coverage 判定与定向重派发依据
+│   │   ├── context.py         # 协议上下文构造
+│   │   └── scoring.py         # hypothesis_scores 可解释裁决
+│   ├── evidence/              # Typed Evidence 证据模型与清洗/转换/组装
 │   ├── api.py                 # FastAPI 路由定义
 │   ├── config.py              # 配置管理（含重试配置）
 │   ├── database.py            # 数据库模型与操作（含审计日志）
@@ -485,6 +549,10 @@ TicketSolve/
 │   ├── state.py               # 工作流状态定义
 │   ├── utils.py               # 工具调用执行辅助
 │   └── workflow.py            # 工作流编排（含 MCP Client 初始化）
+├── eval/
+│   ├── cases.yaml             # SREBench Lite 评测用例
+│   ├── demo_trace.py          # 生成 NGINX_BAD_ROUTE 展示轨迹
+│   └── demo_trace_nginx_bad_route.json
 ├── .env.example               # 环境变量模板
 ├── .gitignore
 ├── LICENSE
@@ -499,7 +567,7 @@ TicketSolve/
 
 - **Supervisor 调度**：替代原 Router，支持并行派发多个 Agent
 - **Dispatch 并行执行**：根据 dispatched_agents 列表，asyncio.gather 并行调用
-- **DynamicCheck 动态协作**：扫描 evidence_request 消息，自动追加派发或生成 evidence_response（最多 3 轮）
+- **DynamicCheck 动态协作**：扫描 evidence_request 消息，先做 evidence coverage 判定；证据覆盖则自动生成 evidence_response，证据不足则定向重派发目标 Agent（最多 3 轮）
 - **Aggregate 聚合推理**：综合多个 Agent 诊断结果，使用 Structured Output
 - **审批分支**：根据审批结果决定执行或终止
 - **MCP Client 初始化**：工作流创建时一次性初始化 MCP 连接，获取所有工具并按类别分组注入各 Agent
@@ -581,6 +649,20 @@ TicketSolve/
 - 新增 `/api/rate-limiter/stats` 查询限流器状态
 
 ## 使用示例
+
+### 生成展示 Trace
+
+用于面试/README 截图的固定轨迹，不依赖 LLM、Docker 或数据库：
+
+```bash
+python eval/demo_trace.py --json-out eval/demo_trace_nginx_bad_route.json
+```
+
+查看 coverage 调度关键事件：
+
+```bash
+python eval/demo_trace.py | findstr /C:"forced_redispatch" /C:"hypothesis_scores"
+```
 
 ### 命令行模式
 
@@ -789,7 +871,7 @@ Agent 通过 CommunicationBus 通信总线协作（证据协作协议 v1）：
    - 如果目标 Agent 尚未执行 → 追加派发
    - 如果目标 Agent 已有结果且证据覆盖 → 自动生成 evidence_response
    - 如果目标 Agent 已有结果但证据不足 → 定向重跑
-4. 如果目标 Agent 已有诊断结果，DynamicCheck 自动生成 `evidence_response`
+4. 同一个 evidence_request 最多触发一次定向重跑，避免多 Agent 协作进入无限循环
 5. Aggregate 节点根据 hypothesis、evidence_response、support/challenge 进行冲突裁决
    - 输出 protocol_summary，包含 winning_hypothesis_id、hypothesis_scores（support_score/tool_evidence_score/confidence_score/conflict_score/final_score）、conflicts
 

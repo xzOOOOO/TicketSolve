@@ -1,0 +1,825 @@
+/* 全局盒模型：让固定宽度控件在不同视口下保持稳定 */
+* {
+  box-sizing: border-box;
+}
+
+/* 页面根元素：占满视口并使用系统字体 */
+html,
+body,
+#app {
+  min-height: 100%;
+  margin: 0;
+}
+
+/* 页面主体：使用浅色工作台背景 */
+body {
+  background: #f5f7f4;
+  color: #18201c;
+  font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+}
+
+/* 表单控件：统一继承字体 */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+/* 应用外壳：提供整页纵向布局 */
+.app-shell {
+  min-height: 100vh;
+}
+
+/* 顶栏：承载标题、状态和刷新动作 */
+.topbar {
+  align-items: center;
+  background: #ffffff;
+  border-bottom: 1px solid #dbe2d8;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+  min-height: 76px;
+  padding: 14px 24px;
+}
+
+/* 顶栏标题：压缩行高以适配工作台密度 */
+.topbar h1,
+.detail-header h2 {
+  font-size: 22px;
+  line-height: 1.25;
+  margin: 0;
+}
+
+/* 弱标签：展示系统上下文 */
+.eyebrow {
+  color: #5d6f66;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  margin: 0 0 6px;
+  text-transform: uppercase;
+}
+
+/* 顶栏动作区：保持按钮和状态紧凑排列 */
+.topbar__actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+/* 主工作区：左侧列表、右侧详情 */
+.workspace {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  padding: 16px;
+}
+
+/* 左侧栏：固定内容宽度并垂直排列面板 */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* 内容区：承载详情视图 */
+.content {
+  min-width: 0;
+}
+
+/* 面板：用于单个工具或数据组 */
+.panel {
+  background: #ffffff;
+  border: 1px solid #dbe2d8;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(20, 36, 28, 0.04);
+  padding: 16px;
+}
+
+/* 列表面板：占据剩余侧栏高度 */
+.panel--list {
+  flex: 1;
+  min-height: 360px;
+}
+
+/* 面板头部：标题与数量左右对齐 */
+.panel__header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+/* 面板标题：保持密集信息区的字号克制 */
+.panel__header h2,
+.panel__header h3 {
+  font-size: 16px;
+  line-height: 1.3;
+  margin: 0;
+}
+
+/* 创建表单：纵向布局 */
+.ticket-form,
+.approval-form {
+  display: grid;
+  gap: 12px;
+}
+
+/* 表单标签：字段名和控件上下排列 */
+.ticket-form label {
+  display: grid;
+  gap: 6px;
+}
+
+/* 字段名：使用中等灰度 */
+.ticket-form span {
+  color: #536158;
+  font-size: 13px;
+}
+
+/* 输入控件：统一边框和高度 */
+input,
+select,
+textarea {
+  background: #fbfcfa;
+  border: 1px solid #cbd6ce;
+  border-radius: 6px;
+  color: #18201c;
+  min-height: 38px;
+  outline: none;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+/* 多行输入：固定最小高度 */
+textarea {
+  min-height: 116px;
+  resize: vertical;
+}
+
+/* 聚焦态：提供可见的键盘焦点 */
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: #357f68;
+  box-shadow: 0 0 0 3px rgba(53, 127, 104, 0.14);
+}
+
+/* 主要按钮：用于提交类动作 */
+.primary-button,
+.icon-button {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  font-weight: 700;
+  justify-content: center;
+  min-height: 38px;
+  padding: 8px 12px;
+}
+
+/* 主要按钮颜色：绿色强调业务动作 */
+.primary-button {
+  background: #2f7d68;
+  color: #ffffff;
+}
+
+/* 次要按钮颜色：白底边框用于工具动作 */
+.icon-button {
+  background: #ffffff;
+  border-color: #cbd6ce;
+  color: #26342d;
+}
+
+/* 禁用按钮：降低对比度并取消手型 */
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* 筛选区：搜索和状态筛选并列 */
+.filters {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  margin-bottom: 12px;
+}
+
+/* 工单列表：固定行距并允许滚动 */
+.ticket-list {
+  display: grid;
+  gap: 8px;
+  max-height: calc(100vh - 430px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+/* 工单行：使用按钮实现可访问选择 */
+.ticket-row {
+  align-items: center;
+  background: #fbfcfa;
+  border: 1px solid #dbe2d8;
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-height: 68px;
+  padding: 10px;
+  text-align: left;
+  width: 100%;
+}
+
+/* 当前选中工单：左边框强调 */
+.ticket-row--active {
+  border-color: #2f7d68;
+  box-shadow: inset 3px 0 0 #2f7d68;
+}
+
+/* 工单主要文本：防止长症状撑破布局 */
+.ticket-row__main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* 工单摘要：两行截断 */
+.ticket-row small {
+  color: #5d6f66;
+  display: -webkit-box;
+  line-height: 1.35;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* 详情头部：标题和标签分列 */
+.detail-header {
+  align-items: flex-start;
+  background: #ffffff;
+  border: 1px solid #dbe2d8;
+  border-radius: 8px;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding: 18px;
+}
+
+/* 详情标题：长故障描述允许换行 */
+.detail-header h2 {
+  max-width: 900px;
+  overflow-wrap: anywhere;
+}
+
+/* 详情标签区：支持换行 */
+.detail-header__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* 指标网格：固定四列，移动端会降级 */
+.metrics-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-bottom: 16px;
+}
+
+/* 指标卡：展示计数 */
+.metric {
+  background: #ffffff;
+  border: 1px solid #dbe2d8;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  min-height: 82px;
+  padding: 14px;
+}
+
+/* 指标标签：弱化说明 */
+.metric span {
+  color: #5d6f66;
+  font-size: 13px;
+}
+
+/* 指标数字：保持清晰但不过度放大 */
+.metric strong {
+  font-size: 24px;
+}
+
+/* 紧凑指标卡：用于协作链路摘要 */
+.metric--compact {
+  min-height: 70px;
+}
+
+/* 紧凑指标数字：协作摘要内稍微收敛字号 */
+.metric--compact strong {
+  font-size: 20px;
+}
+
+/* 页签：横向滚动适配窄屏 */
+.tabs {
+  background: #ffffff;
+  border: 1px solid #dbe2d8;
+  border-radius: 8px;
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  overflow-x: auto;
+  padding: 6px;
+}
+
+/* 页签按钮：固定高度避免切换跳动 */
+.tabs button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: #435247;
+  cursor: pointer;
+  min-height: 34px;
+  padding: 6px 12px;
+  white-space: nowrap;
+}
+
+/* 当前页签：绿色底色强调 */
+.tabs__button--active {
+  background: #e1f1eb !important;
+  color: #1f604f !important;
+  font-weight: 700;
+}
+
+/* 页签内容：纵向排列 */
+.tab-panel {
+  display: grid;
+  gap: 16px;
+}
+
+/* 双列布局：展示概览面板 */
+.two-column {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* 字段网格：适合复杂字段摘要 */
+.field-grid,
+.mini-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+/* 紧凑字段网格：修复步骤内部使用 */
+.field-grid--compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* 字段容器：防止长命令外溢 */
+.field-grid div,
+.mini-grid div {
+  min-width: 0;
+}
+
+/* 字段名：统一弱化 */
+dt {
+  color: #5d6f66;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+/* 字段值：允许长文本换行 */
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 行内代码：用于命令展示 */
+code {
+  background: #eef3f0;
+  border-radius: 4px;
+  color: #244439;
+  padding: 2px 4px;
+}
+
+/* 审批表单：三个控件一行 */
+.approval-form {
+  grid-template-columns: 100px minmax(0, 1fr) 104px;
+  margin-top: 14px;
+}
+
+/* 证据网格：卡片自动换列 */
+.evidence-grid,
+.agent-grid,
+.collaboration-summary-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+/* 证据卡：展示单条结构化证据 */
+.evidence-card,
+.agent-card,
+.trace-card,
+.step-card,
+.message-card {
+  background: #fbfcfa;
+  border: 1px solid #dbe2d8;
+  border-radius: 8px;
+  min-width: 0;
+  padding: 12px;
+}
+
+/* 证据头部：工具名和状态并列 */
+.evidence-card__top,
+.trace-card__top,
+.step-card__top,
+.timeline-item__top,
+.message-card__top {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+/* 证据文本：允许长日志换行 */
+.evidence-card p {
+  color: #2c3a31;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 小型字段网格：证据元数据使用 */
+.mini-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* 修复步骤列表：纵向排列 */
+.step-list,
+.trace-list,
+.timeline,
+.communication-line {
+  display: grid;
+  gap: 12px;
+}
+
+/* 链路元信息：展示关联 ID、消息数和参与 Agent */
+.chain-meta {
+  background: #fbfcfa;
+  border: 1px solid #dbe2d8;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0 0 14px;
+  padding: 12px;
+}
+
+/* 通信链容器：给消息之间提供连续引导线 */
+.communication-line {
+  border-left: 2px solid #d4dfd8;
+  margin-left: 17px;
+  padding-left: 16px;
+}
+
+/* 通信消息卡：编号和内容分列 */
+.message-card {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 38px minmax(0, 1fr);
+  position: relative;
+}
+
+/* 通信消息连接点：让卡片和左侧链路连起来 */
+.message-card::before {
+  background: #d4dfd8;
+  content: "";
+  height: 2px;
+  left: -18px;
+  position: absolute;
+  top: 28px;
+  width: 18px;
+}
+
+/* 通信消息编号：固定尺寸，保持链路稳定 */
+.message-card__marker {
+  align-items: center;
+  border-radius: 6px;
+  display: flex;
+  font-weight: 800;
+  height: 32px;
+  justify-content: center;
+  width: 32px;
+}
+
+/* 通信消息主体：允许复杂字段自然换行 */
+.message-card__body {
+  min-width: 0;
+}
+
+/* 通信正文：突出请求或回复内容 */
+.message-card__content {
+  color: #26342d;
+  line-height: 1.55;
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+}
+
+/* 消息携带证据列表：展示回复中的多条证据 */
+.message-evidence-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* 消息证据卡：比主卡更紧凑 */
+.message-evidence {
+  background: #ffffff;
+  border: 1px solid #dbe2d8;
+  border-radius: 6px;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 10px;
+}
+
+/* 消息证据正文：横跨整行显示 */
+.message-evidence p {
+  color: #536158;
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 假设消息颜色：用于链路起点 */
+.message-hypothesis {
+  background: #e3f2f0;
+  border-color: #98c9bd;
+  color: #1d6255;
+}
+
+/* 证据请求颜色：强调待响应关系 */
+.message-request {
+  background: #fff4d7;
+  border-color: #e4c775;
+  color: #755500;
+}
+
+/* 证据回复颜色：强调已响应关系 */
+.message-response {
+  background: #e5f4e8;
+  border-color: #9dceb0;
+  color: #1d6738;
+}
+
+/* 质疑消息颜色：强调冲突 */
+.message-challenge {
+  background: #ffe7e4;
+  border-color: #e2a19a;
+  color: #973a31;
+}
+
+/* 普通消息颜色：作为弱提示 */
+.message-info {
+  background: #edf0ee;
+  border-color: #d2d9d5;
+  color: #536158;
+}
+
+/* 修复步骤卡：编号和内容分列 */
+.step-card {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 40px minmax(0, 1fr);
+}
+
+/* 修复步骤编号：固定尺寸 */
+.step-card__index,
+.timeline-item__marker {
+  align-items: center;
+  background: #f0e7d2;
+  border-radius: 6px;
+  color: #6b4d14;
+  display: flex;
+  font-weight: 800;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
+/* 修复步骤主体：允许内部内容压缩 */
+.step-card__body,
+.timeline-item__body {
+  min-width: 0;
+}
+
+/* 修复步骤标题：紧凑显示 */
+.step-card h4 {
+  font-size: 15px;
+  margin: 0;
+}
+
+/* Agent 卡片：纵向展示名称、次数和轮次 */
+.agent-card {
+  display: grid;
+  gap: 6px;
+}
+
+/* Agent 辅助文本：弱化 */
+.agent-card span,
+.agent-card small {
+  color: #5d6f66;
+}
+
+/* 时间线项目：编号和内容分列 */
+.timeline-item {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 40px minmax(0, 1fr);
+}
+
+/* 状态标签：通用胶囊样式 */
+.status-pill,
+.status-dot {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 24px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+/* 成功状态颜色 */
+.status-ok {
+  background: #dff3e9;
+  color: #1d6b53;
+}
+
+/* 待处理状态颜色 */
+.status-pending {
+  background: #fff0c7;
+  color: #7a5600;
+}
+
+/* 失败状态颜色 */
+.status-failed {
+  background: #ffe1df;
+  color: #a33a32;
+}
+
+/* 弱状态颜色 */
+.status-muted {
+  background: #edf0ee;
+  color: #66736b;
+}
+
+/* 空状态：居中展示 */
+.empty-state {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #dbe2d8;
+  border-radius: 8px;
+  display: grid;
+  min-height: 420px;
+  padding: 24px;
+  text-align: center;
+}
+
+/* 空状态标题：保持克制 */
+.empty-state h2 {
+  margin: 0;
+}
+
+/* 空状态文本：弱化辅助信息 */
+.empty-state p,
+.empty-text {
+  color: #68766d;
+  margin: 0;
+}
+
+/* 错误文本：红色提示 */
+.error-text {
+  color: #a33a32;
+  font-size: 13px;
+  margin: 0;
+}
+
+/* JSON 树：使用等宽字体展示结构 */
+.json-tree {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  min-width: 0;
+}
+
+/* 嵌套 JSON：增加左侧引导线 */
+.json-tree--nested {
+  border-left: 1px solid #dbe2d8;
+  margin-left: 10px;
+  padding-left: 10px;
+}
+
+/* JSON 行：字段名、类型和值并列 */
+.json-tree__row {
+  align-items: flex-start;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+}
+
+/* JSON 折叠按钮：固定尺寸避免跳动 */
+.json-tree__toggle,
+.json-tree__spacer {
+  align-items: center;
+  background: #edf3ef;
+  border: 1px solid #d6e0d9;
+  border-radius: 4px;
+  color: #2f7d68;
+  display: inline-flex;
+  flex: 0 0 22px;
+  height: 22px;
+  justify-content: center;
+  width: 22px;
+}
+
+/* JSON 占位：隐藏但保留尺寸 */
+.json-tree__spacer {
+  visibility: hidden;
+}
+
+/* JSON 字段名：醒目展示 */
+.json-tree__label {
+  color: #8a4b2b;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+/* JSON 类型：弱化展示 */
+.json-tree__type {
+  color: #607168;
+  flex: 0 0 auto;
+}
+
+/* JSON 摘要：允许长文本换行 */
+.json-tree__preview {
+  color: #26342d;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* JSON 子节点：缩进展示 */
+.json-tree__children {
+  display: grid;
+  gap: 2px;
+}
+
+/* 窄屏布局：工作区改为单列 */
+@media (max-width: 980px) {
+  .workspace,
+  .two-column {
+    grid-template-columns: 1fr;
+  }
+
+  .ticket-list {
+    max-height: none;
+  }
+}
+
+/* 移动端布局：指标和表单降为单列 */
+@media (max-width: 720px) {
+  .topbar,
+  .detail-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workspace {
+    padding: 10px;
+  }
+
+  .metrics-grid,
+  .field-grid,
+  .field-grid--compact,
+  .mini-grid,
+  .approval-form,
+  .filters,
+  .chain-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .message-card {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+}

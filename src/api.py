@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from langchain_openai import ChatOpenAI
@@ -53,6 +54,23 @@ app = FastAPI(
     description="基于LangGraph的智能工单处理系统",
     version="1.0.0",
     lifespan=lifespan
+)
+
+# 前端开发来源：允许本地 Vue 开发服务器访问 FastAPI 接口
+FRONTEND_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+]
+
+# 跨域中间件：支持前端本地开发时调用 /api 与 /health 接口
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=FRONTEND_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.post("/api/tickets", response_model=APIResponse)
@@ -113,6 +131,49 @@ async def approve_ticket(ticket_id: str, request: ApprovalRequest):
     except Exception as e:
         logger.exception(f"审批工单失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tickets", response_model=APIResponse)
+async def list_tickets(
+    skip: int = Query(0, ge=0, description="跳过的工单数量"),
+    limit: int = Query(50, ge=1, le=200, description="返回的最大工单数量"),
+    db: AsyncSession = Depends(get_db),
+):
+    """查询工单列表，供前端工作台展示。
+
+    参数说明：
+    - skip: 分页偏移量，默认 0
+    - limit: 分页大小，默认 50，最大 200
+    - db: 数据库异步会话
+
+    返回值说明：
+    - APIResponse: 包含工单列表、分页参数和当前页数量
+
+    异常说明：
+    - 数据库查询异常会由 FastAPI 返回 500 错误
+    """
+    from database import get_all_tickets
+
+    # ticket_models：数据库返回的工单 ORM 对象列表
+    ticket_models = await get_all_tickets(db, skip=skip, limit=limit)
+    # ticket_items：转换后的接口安全字典列表，保留复杂 JSON 字段供前端展开展示
+    ticket_items = [
+        TicketResponse.model_validate(ticket).model_dump()
+        for ticket in ticket_models
+    ]
+
+    return APIResponse(
+        code=200,
+        message="查询成功",
+        data={
+            "items": ticket_items,
+            "skip": skip,
+            "limit": limit,
+            # 当前返回数量：前端用于展示本页加载结果
+            "count": len(ticket_items),
+        },
+    )
+
 
 @app.get("/api/tickets/{ticket_id}", response_model=APIResponse)
 async def get_ticket(ticket_id: str, db: AsyncSession = Depends(get_db)):

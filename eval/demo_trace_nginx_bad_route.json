@@ -1,0 +1,587 @@
+{
+  "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+  "case": "NGINX_BAD_ROUTE",
+  "purpose": "展示多 Agent 证据协作、coverage 调度、安全执行和恢复验证闭环",
+  "agent_messages": [
+    {
+      "message_id": "hyp-app-direct-ok",
+      "correlation_id": "hyp-app-direct-ok",
+      "related_to": null,
+      "hypothesis_id": null,
+      "status": "open",
+      "sender": "app_agent",
+      "receiver": "broadcast",
+      "content": "应用直连健康，入口异常更可能来自 Nginx 路由",
+      "msg_type": "hypothesis",
+      "confidence": 0.78,
+      "evidence": [
+        {
+          "evidence_id": "ev-acf973214615",
+          "source_agent": "app_agent",
+          "tool_name": "check_app_health",
+          "target": "http://localhost:18081/health",
+          "status": "ok",
+          "observed": "direct app health returned 200",
+          "expected": "direct app health should return 200",
+          "supports_hypothesis": true,
+          "confidence": 0.78,
+          "raw_output_ref": null,
+          "timestamp": "2026-06-06T10:00:00+00:00"
+        }
+      ],
+      "hypothesis": "应用直连健康但 Nginx 入口 502，疑似 upstream 配置错误",
+      "fault_type": "NGINX_BAD_ROUTE",
+      "required_evidence": [],
+      "suggested_tools": [],
+      "supports_hypothesis": null
+    },
+    {
+      "message_id": "req-net-route-evidence",
+      "correlation_id": "hyp-app-direct-ok",
+      "related_to": "hyp-app-direct-ok",
+      "hypothesis_id": "hyp-app-direct-ok",
+      "status": "open",
+      "sender": "app_agent",
+      "receiver": "net_agent",
+      "content": "需要确认入口 Nginx 路由是否异常，以及应用直连是否健康",
+      "msg_type": "evidence_request",
+      "confidence": 0.78,
+      "evidence": [],
+      "hypothesis": "应用直连健康但 Nginx 入口 502，疑似 upstream 配置错误",
+      "fault_type": "NGINX_BAD_ROUTE",
+      "required_evidence": [
+        "nginx route status",
+        "direct app health"
+      ],
+      "suggested_tools": [
+        "check_network_http_route"
+      ],
+      "supports_hypothesis": null
+    },
+    {
+      "message_id": "resp-net-route-evidence",
+      "correlation_id": "hyp-app-direct-ok",
+      "related_to": "req-net-route-evidence",
+      "hypothesis_id": "hyp-app-direct-ok",
+      "status": "closed",
+      "sender": "net_agent",
+      "receiver": "app_agent",
+      "content": "net_agent 已完成诊断，结论：Nginx upstream 指向错误端口，入口返回 502；应用直连健康；证据数量：3",
+      "msg_type": "evidence_response",
+      "confidence": 0.92,
+      "evidence": [
+        {
+          "evidence_id": "ev-b936ed393d51",
+          "source_agent": "net_agent",
+          "tool_name": null,
+          "target": null,
+          "status": "unknown",
+          "observed": "nginx route status failed",
+          "expected": null,
+          "supports_hypothesis": true,
+          "confidence": 0.92,
+          "raw_output_ref": null,
+          "timestamp": "2026-06-06T10:00:00+00:00"
+        },
+        {
+          "evidence_id": "ev-ca394238fb40",
+          "source_agent": "net_agent",
+          "tool_name": null,
+          "target": null,
+          "status": "unknown",
+          "observed": "direct app health ok",
+          "expected": null,
+          "supports_hypothesis": true,
+          "confidence": 0.92,
+          "raw_output_ref": null,
+          "timestamp": "2026-06-06T10:00:00+00:00"
+        },
+        {
+          "evidence_id": "ev-a17b722d68ee",
+          "source_agent": "net_agent",
+          "tool_name": "check_network_http_route",
+          "target": "http://localhost:18080/health",
+          "status": "failed",
+          "observed": "nginx route status failed: 502; direct app health ok: 200",
+          "expected": null,
+          "supports_hypothesis": true,
+          "confidence": 0.92,
+          "raw_output_ref": "raw-436320fb5331",
+          "timestamp": "2026-06-06T10:00:00+00:00"
+        }
+      ],
+      "hypothesis": "应用直连健康但 Nginx 入口 502，疑似 upstream 配置错误",
+      "fault_type": "NGINX_BAD_ROUTE",
+      "required_evidence": [],
+      "suggested_tools": [],
+      "supports_hypothesis": true
+    }
+  ],
+  "protocol_summary": {
+    "winning_hypothesis_id": "hyp-app-direct-ok",
+    "supporting_evidence_count": 4,
+    "response_count": 1,
+    "conflicts": [],
+    "hypothesis_scores": [
+      {
+        "hypothesis_id": "hyp-app-direct-ok",
+        "sender": "app_agent",
+        "fault_type": "NGINX_BAD_ROUTE",
+        "hypothesis": "应用直连健康但 Nginx 入口 502，疑似 upstream 配置错误",
+        "support_score": 4.0,
+        "tool_evidence_score": 3.0,
+        "confidence_score": 1.7,
+        "conflict_score": 0.0,
+        "final_score": 8.7,
+        "supporting_evidence_count": 4,
+        "tool_evidence_count": 2,
+        "supporting_message_count": 1,
+        "conflicting_message_count": 0,
+        "challenge_count": 0,
+        "unsupported_response_count": 0,
+        "response_count": 1,
+        "top_evidence": [
+          "check_app_health target=http://localhost:18081/health status=ok: direct app health returned 200",
+          "net_agent status=unknown: nginx route status failed",
+          "net_agent status=unknown: direct app health ok"
+        ],
+        "reason": "4 条支持证据，2 条工具观测，0 条反驳/不支持消息，综合置信度 1.7"
+      }
+    ],
+    "hypothesis_count": 1,
+    "evidence_request_count": 1,
+    "evidence_response_count": 1
+  },
+  "trace_events": [
+    {
+      "schema_version": "trace.v1",
+      "event_type": "agent_started",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "supervisor",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {
+        "symptom": "The app is healthy directly, but nginx returns bad gateway."
+      },
+      "output": {},
+      "error": null,
+      "metadata": {
+        "dispatch_round": 0
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "handoff_requested",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "supervisor",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {},
+      "output": {
+        "dispatched_agents": [
+          "app_agent",
+          "net_agent"
+        ]
+      },
+      "error": null,
+      "metadata": {
+        "dispatch_round": 0,
+        "reason": "入口和应用健康状态需要跨域确认"
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "tool_called",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "app_agent",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {
+        "tool": "check_app_health",
+        "target": "http://localhost:18081/health"
+      },
+      "output": {
+        "status": "ok",
+        "http_status": 200
+      },
+      "error": null,
+      "metadata": {
+        "dispatch_round": 1
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "diagnosis_generated",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "app_agent",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {},
+      "output": {
+        "fault_type": "NGINX_BAD_ROUTE",
+        "hypothesis": "应用直连健康但 Nginx 入口 502，疑似 upstream 配置错误"
+      },
+      "error": null,
+      "metadata": {
+        "message_id": "hyp-app-direct-ok",
+        "confidence": 0.78
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "handoff_requested",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "app_agent",
+      "status": "pending",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {
+        "hypothesis_id": "hyp-app-direct-ok"
+      },
+      "output": {
+        "message_id": "req-net-route-evidence",
+        "correlation_id": "hyp-app-direct-ok",
+        "related_to": "hyp-app-direct-ok",
+        "hypothesis_id": "hyp-app-direct-ok",
+        "status": "open",
+        "sender": "app_agent",
+        "receiver": "net_agent",
+        "content": "需要确认入口 Nginx 路由是否异常，以及应用直连是否健康",
+        "msg_type": "evidence_request",
+        "confidence": 0.78,
+        "evidence": [],
+        "hypothesis": "应用直连健康但 Nginx 入口 502，疑似 upstream 配置错误",
+        "fault_type": "NGINX_BAD_ROUTE",
+        "required_evidence": [
+          "nginx route status",
+          "direct app health"
+        ],
+        "suggested_tools": [
+          "check_network_http_route"
+        ],
+        "supports_hypothesis": null
+      },
+      "error": null,
+      "metadata": {
+        "message_id": "req-net-route-evidence",
+        "correlation_id": "hyp-app-direct-ok",
+        "msg_type": "evidence_request",
+        "target_agent": "net_agent",
+        "required_evidence": [
+          "nginx route status",
+          "direct app health"
+        ],
+        "suggested_tools": [
+          "check_network_http_route"
+        ]
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "handoff_requested",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "dynamic_check",
+      "status": "pending",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {
+        "cached_agent_result_exists": true,
+        "coverage": false
+      },
+      "output": {
+        "target_agent": "net_agent",
+        "forced_redispatch": true
+      },
+      "error": null,
+      "metadata": {
+        "message_id": "req-net-route-evidence",
+        "correlation_id": "hyp-app-direct-ok",
+        "msg_type": "evidence_request",
+        "target_agent": "net_agent",
+        "coverage": false,
+        "forced_redispatch": true,
+        "required_evidence": [
+          "nginx route status",
+          "direct app health"
+        ],
+        "suggested_tools": [
+          "check_network_http_route"
+        ]
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "tool_called",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "net_agent",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {
+        "tool": "check_network_http_route",
+        "target": "http://localhost:18080/health"
+      },
+      "output": {
+        "nginx_status": 502,
+        "direct_app_status": 200
+      },
+      "error": null,
+      "metadata": {
+        "dispatch_round": 2,
+        "forced_redispatch": true
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "observation_received",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "dynamic_check",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {},
+      "output": {
+        "message_id": "resp-net-route-evidence",
+        "correlation_id": "hyp-app-direct-ok",
+        "related_to": "req-net-route-evidence",
+        "hypothesis_id": "hyp-app-direct-ok",
+        "status": "closed",
+        "sender": "net_agent",
+        "receiver": "app_agent",
+        "content": "net_agent 已完成诊断，结论：Nginx upstream 指向错误端口，入口返回 502；应用直连健康；证据数量：3",
+        "msg_type": "evidence_response",
+        "confidence": 0.92,
+        "evidence": [
+          {
+            "evidence_id": "ev-b936ed393d51",
+            "source_agent": "net_agent",
+            "tool_name": null,
+            "target": null,
+            "status": "unknown",
+            "observed": "nginx route status failed",
+            "expected": null,
+            "supports_hypothesis": true,
+            "confidence": 0.92,
+            "raw_output_ref": null,
+            "timestamp": "2026-06-06T10:00:00+00:00"
+          },
+          {
+            "evidence_id": "ev-ca394238fb40",
+            "source_agent": "net_agent",
+            "tool_name": null,
+            "target": null,
+            "status": "unknown",
+            "observed": "direct app health ok",
+            "expected": null,
+            "supports_hypothesis": true,
+            "confidence": 0.92,
+            "raw_output_ref": null,
+            "timestamp": "2026-06-06T10:00:00+00:00"
+          },
+          {
+            "evidence_id": "ev-a17b722d68ee",
+            "source_agent": "net_agent",
+            "tool_name": "check_network_http_route",
+            "target": "http://localhost:18080/health",
+            "status": "failed",
+            "observed": "nginx route status failed: 502; direct app health ok: 200",
+            "expected": null,
+            "supports_hypothesis": true,
+            "confidence": 0.92,
+            "raw_output_ref": "raw-436320fb5331",
+            "timestamp": "2026-06-06T10:00:00+00:00"
+          }
+        ],
+        "hypothesis": "应用直连健康但 Nginx 入口 502，疑似 upstream 配置错误",
+        "fault_type": "NGINX_BAD_ROUTE",
+        "required_evidence": [],
+        "suggested_tools": [],
+        "supports_hypothesis": true
+      },
+      "error": null,
+      "metadata": {
+        "message_id": "req-net-route-evidence",
+        "correlation_id": "hyp-app-direct-ok",
+        "msg_type": "evidence_response",
+        "target_agent": "net_agent",
+        "coverage": true,
+        "forced_redispatch": false,
+        "auto_response": true,
+        "required_evidence": [
+          "nginx route status",
+          "direct app health"
+        ],
+        "suggested_tools": [
+          "check_network_http_route"
+        ]
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "diagnosis_generated",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "aggregate",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {},
+      "output": {
+        "diagnosis": "Nginx upstream 指向错误端口导致入口 502",
+        "fault_type": "NGINX_BAD_ROUTE",
+        "protocol_summary": {
+          "winning_hypothesis_id": "hyp-app-direct-ok",
+          "supporting_evidence_count": 4,
+          "response_count": 1,
+          "conflicts": [],
+          "hypothesis_scores": [
+            {
+              "hypothesis_id": "hyp-app-direct-ok",
+              "sender": "app_agent",
+              "fault_type": "NGINX_BAD_ROUTE",
+              "hypothesis": "应用直连健康但 Nginx 入口 502，疑似 upstream 配置错误",
+              "support_score": 4.0,
+              "tool_evidence_score": 3.0,
+              "confidence_score": 1.7,
+              "conflict_score": 0.0,
+              "final_score": 8.7,
+              "supporting_evidence_count": 4,
+              "tool_evidence_count": 2,
+              "supporting_message_count": 1,
+              "conflicting_message_count": 0,
+              "challenge_count": 0,
+              "unsupported_response_count": 0,
+              "response_count": 1,
+              "top_evidence": [
+                "check_app_health target=http://localhost:18081/health status=ok: direct app health returned 200",
+                "net_agent status=unknown: nginx route status failed",
+                "net_agent status=unknown: direct app health ok"
+              ],
+              "reason": "4 条支持证据，2 条工具观测，0 条反驳/不支持消息，综合置信度 1.7"
+            }
+          ],
+          "hypothesis_count": 1,
+          "evidence_request_count": 1,
+          "evidence_response_count": 1
+        }
+      },
+      "error": null,
+      "metadata": {
+        "winning_hypothesis_id": "hyp-app-direct-ok"
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "plan_generated",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "fix_agent",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {},
+      "output": {
+        "plan_id": "PLAN-DEMO-NGINX",
+        "description": "恢复 Nginx upstream 到正确 app 端口",
+        "risk_level": "low",
+        "steps": [
+          {
+            "step_id": 1,
+            "action": "恢复 NGINX_BAD_ROUTE 故障",
+            "action_type": "RECOVER_FAULT",
+            "target": "NGINX_BAD_ROUTE",
+            "command": "python lab/chaos.py recover NGINX_BAD_ROUTE"
+          }
+        ],
+        "verification": {
+          "commands": [
+            "curl http://localhost:18080/health"
+          ],
+          "expected_result": "HTTP 200"
+        }
+      },
+      "error": null,
+      "metadata": {
+        "action_dsl": true,
+        "risk_level": "low"
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "policy_checked",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "guardrail",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {},
+      "output": {
+        "passed": true,
+        "violations": []
+      },
+      "error": null,
+      "metadata": {
+        "dsl_only": true,
+        "free_form_shell": false
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "approval_received",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "human_approval",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {},
+      "output": {
+        "approved": true,
+        "comments": "demo auto approval"
+      },
+      "error": null,
+      "metadata": {
+        "approval_required": true
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "action_executed",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "executor",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {
+        "action_type": "RECOVER_FAULT",
+        "target": "NGINX_BAD_ROUTE"
+      },
+      "output": {
+        "exit_code": 0,
+        "compiled_command": "python lab/chaos.py recover NGINX_BAD_ROUTE"
+      },
+      "error": null,
+      "metadata": {
+        "executor_mode": "docker_lab",
+        "compiled_from_action_dsl": true
+      }
+    },
+    {
+      "schema_version": "trace.v1",
+      "event_type": "verification_passed",
+      "ticket_id": "DEMO-NGINX-BAD-ROUTE",
+      "agent_name": "verify",
+      "status": "success",
+      "timestamp": "2026-06-06T10:00:00+00:00",
+      "input": {},
+      "output": {
+        "url": "http://localhost:18080/health",
+        "http_status": 200,
+        "verified": true
+      },
+      "error": null,
+      "metadata": {
+        "probe_count": 1
+      }
+    }
+  ],
+  "security_boundary": {
+    "llm_direct_shell": false,
+    "repair_output": "Action DSL",
+    "guardrail": "run_guardrail",
+    "executor_mode": "docker_lab",
+    "allowed_scope": [
+      "srebench-* containers",
+      "lab/chaos.py recover/inject/reset",
+      "health probes"
+    ]
+  }
+}
