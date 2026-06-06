@@ -33,7 +33,31 @@ DB_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
 - diagnosis: 具体诊断结论
 - possible_causes: 可能的原因列表
 - confidence: 诊断置信度 0-1
-- need_collaboration: 可选的协作 Agent（仅限以下名称，不要编造其他 Agent）：db_agent（数据库诊断专家）、net_agent（网络诊断专家）、app_agent（应用诊断专家）。如不需要协作则为空列表。"""),
+- fault_type: 可选的结构化故障类型，如 DB_CONN_FAIL/DB_SLOW_QUERY/APP_PROCESS_DOWN/REDIS_DOWN/NGINX_BAD_ROUTE；无法判断则为空
+  作用：让下游 FixAgent 直接映射到 Action DSL（如 DB_CONN_FAIL → RECOVER_FAULT）
+- hypothesis: 一句话可验证假设，例如"Postgres 容器停止导致数据库连接失败"
+  作用：作为证据协作协议的起点，其他 Agent 会基于这个假设请求补充证据
+- evidence: 支持该诊断的结构化证据列表，必须来自工具返回或其他 Agent 消息。每项是对象，格式：
+  {{"source_agent": "db_agent", "tool_name": "check_db_connection", "target": "localhost:15432", "status": "failed", "observed": "连接被拒绝", "expected": "端口可连接且 SELECT 1 成功", "supports_hypothesis": true, "confidence": 0.8, "raw_output_ref": "可选的原始输出引用"}}
+  字段说明：
+  - source_agent：谁发现的这条证据
+  - tool_name：用什么工具发现的
+  - target：检查对象（如 IP:端口、URL、进程名）
+  - status：结果状态（success/failed/degraded/unknown）
+  - observed：实际观察到的现象
+  - expected：预期应该看到的现象
+  - supports_hypothesis：这条证据是否支持你的假设（true/false）
+  - confidence：这条证据的可信度（0-1）
+  - raw_output_ref：可选，引用原始工具输出的摘要
+- collaboration_requests: 如果你发现证据不足、需要其他 Agent 协助验证，填写此字段。
+  列表元素固定格式：
+  {{"target_agent": "net_agent", "required_evidence": ["nginx route status"], "reason": "需要确认入口路由是否异常", "suggested_tools": ["check_network_http_route"]}}
+  字段说明：
+  - target_agent：找谁帮忙（仅限 db_agent/net_agent/app_agent）
+  - required_evidence：需要对方提供什么证据（字符串列表）
+  - reason：为什么需要这个证据（给对方 LLM 看的上下文）
+  - suggested_tools：建议对方用什么工具查（降低对方决策成本）
+  如果不需要协作，必须传空列表 []，不要省略此字段。"""),
 ])
 
 NET_PROMPT = ChatPromptTemplate.from_messages([
@@ -68,7 +92,30 @@ NET_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
 - diagnosis: 具体诊断结论
 - possible_causes: 可能的原因列表
 - confidence: 诊断置信度 0-1
-- need_collaboration: 可选的协作 Agent（仅限以下名称，不要编造其他 Agent）：db_agent（数据库诊断专家）、net_agent（网络诊断专家）、app_agent（应用诊断专家）。如不需要协作则为空列表。"""),
+- fault_type: 可选的结构化故障类型，如 DB_CONN_FAIL/DB_SLOW_QUERY/APP_PROCESS_DOWN/REDIS_DOWN/NGINX_BAD_ROUTE；无法判断则为空
+- hypothesis: 一句话可验证假设，例如"Nginx upstream 指向错误端口导致入口 502"
+  作用：作为证据协作协议的起点，其他 Agent 会基于这个假设请求补充证据
+- evidence: 支持该诊断的结构化证据列表，必须来自工具返回或其他 Agent 消息。每项是对象，格式：
+  {{"source_agent": "net_agent", "tool_name": "check_network_http_route", "target": "http://localhost:18080/health", "status": "failed", "observed": "nginx 入口 502，应用直连 200", "expected": "入口和直连均返回 200", "supports_hypothesis": true, "confidence": 0.85, "raw_output_ref": "可选的原始输出引用"}}
+  字段说明：
+  - source_agent：谁发现的这条证据
+  - tool_name：用什么工具发现的
+  - target：检查对象（如 URL、IP、域名）
+  - status：结果状态（success/failed/degraded/unknown）
+  - observed：实际观察到的现象
+  - expected：预期应该看到的现象
+  - supports_hypothesis：这条证据是否支持你的假设（true/false）
+  - confidence：这条证据的可信度（0-1）
+  - raw_output_ref：可选，引用原始工具输出的摘要
+- collaboration_requests: 如果你发现证据不足、需要其他 Agent 协助验证，填写此字段。
+  列表元素固定格式：
+  {{"target_agent": "app_agent", "required_evidence": ["direct app health"], "reason": "需要确认应用直连是否健康", "suggested_tools": ["check_app_health"]}}
+  字段说明：
+  - target_agent：找谁帮忙（仅限 db_agent/net_agent/app_agent）
+  - required_evidence：需要对方提供什么证据（字符串列表）
+  - reason：为什么需要这个证据（给对方 LLM 看的上下文）
+  - suggested_tools：建议对方用什么工具查（降低对方决策成本）
+  如果不需要协作，必须传空列表 []，不要省略此字段。"""),
 ])
 
 APP_PROMPT = ChatPromptTemplate.from_messages([
@@ -104,7 +151,30 @@ APP_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
 - diagnosis: 具体诊断结论
 - possible_causes: 可能的原因列表
 - confidence: 诊断置信度 0-1
-- need_collaboration: 可选的协作 Agent（仅限以下名称，不要编造其他 Agent）：db_agent（数据库诊断专家）、net_agent（网络诊断专家）、app_agent（应用诊断专家）。如不需要协作则为空列表。"""),
+- fault_type: 可选的结构化故障类型，如 DB_CONN_FAIL/DB_SLOW_QUERY/APP_PROCESS_DOWN/REDIS_DOWN/NGINX_BAD_ROUTE；无法判断则为空
+- hypothesis: 一句话可验证假设，例如"应用容器停止导致服务不可用"
+  作用：作为证据协作协议的起点，其他 Agent 会基于这个假设请求补充证据
+- evidence: 支持该诊断的结构化证据列表，必须来自工具返回或其他 Agent 消息。每项是对象，格式：
+  {{"source_agent": "app_agent", "tool_name": "check_app_health", "target": "http://localhost:18081/health", "status": "degraded", "observed": "health 返回 redis failed", "expected": "db 和 redis 均 ok", "supports_hypothesis": true, "confidence": 0.8, "raw_output_ref": "可选的原始输出引用"}}
+  字段说明：
+  - source_agent：谁发现的这条证据
+  - tool_name：用什么工具发现的
+  - target：检查对象（如 URL、进程名、端口）
+  - status：结果状态（success/failed/degraded/unknown）
+  - observed：实际观察到的现象
+  - expected：预期应该看到的现象
+  - supports_hypothesis：这条证据是否支持你的假设（true/false）
+  - confidence：这条证据的可信度（0-1）
+  - raw_output_ref：可选，引用原始工具输出的摘要
+- collaboration_requests: 如果你发现证据不足、需要其他 Agent 协助验证，填写此字段。
+  列表元素固定格式：
+  {{"target_agent": "net_agent", "required_evidence": ["nginx route status"], "reason": "需要确认入口代理是否也异常", "suggested_tools": ["check_network_http_route"]}}
+  字段说明：
+  - target_agent：找谁帮忙（仅限 db_agent/net_agent/app_agent）
+  - required_evidence：需要对方提供什么证据（字符串列表）
+  - reason：为什么需要这个证据（给对方 LLM 看的上下文）
+  - suggested_tools：建议对方用什么工具查（降低对方决策成本）
+  如果不需要协作，必须传空列表 []，不要省略此字段。"""),
 ])
 
 FIX_PROMPT = ChatPromptTemplate.from_messages([
@@ -199,7 +269,17 @@ AGGREGATE_PROMPT = ChatPromptTemplate.from_messages([
 - possible_causes: 可能的原因列表
 - confidence: 诊断置信度 0-1
 - contributing_agents: 贡献诊断的Agent列表
-- reasoning: 聚合推理过程"""),
+- reasoning: 聚合推理过程
+- protocol_summary: Agent 协作协议摘要，包含 winning_hypothesis_id、supporting_evidence_count、hypothesis_scores、conflicts。
+  作用：把 Agent 间协作协议的统计结果也纳入聚合输出，供 FixAgent 参考。
+  优先选择证据数量多、工具观测明确、置信度高、被其他 Agent 支持且反驳少的假设。
+  hypothesis_scores 中需要保留每个假设的：
+  - support_score：被其他 Agent 支持的程度
+  - tool_evidence_score：工具观测证据的充分程度
+  - confidence_score：假设本身的置信度
+  - conflict_score：被反驳的程度（越低越好）
+  - final_score：综合得分
+  - reason：为什么得到这个得分"""),
     ("human", "故障现象：{symptom}\n\n各Agent诊断结果：\n{agent_results}")
 ])
 

@@ -10,7 +10,7 @@
 
 - **Supervisor 智能调度**：Supervisor Agent 分析故障症状，智能决定派发哪些诊断 Agent，支持并行派发
 - **多 Agent 并行诊断**：DB Agent、Net Agent、App Agent 三大专业诊断 Agent 并行执行，通过 asyncio.gather 实现高效并发
-- **Agent 间动态协作**：Agent 通过 CommunicationBus 通信总线发送 request_help 消息，DynamicCheck 节点自动追加派发，实现跨领域协作诊断
+- **Agent 间动态协作**：Agent 通过 CommunicationBus 发布 hypothesis、evidence_request、evidence_response 等结构化协议消息，DynamicCheck 节点自动追加派发或补充证据响应，实现跨领域协作诊断
 - **ReAct 推理循环**：诊断 Agent 采用 Think → Act → Observe 循环，多轮调用工具直至信息充足
 - **MCP 工具集成**：基于 FastMCP 实现 MCP Server，通过 langchain-mcp-adapters 自动适配 LangChain 工具链，工具按类别分组注入各 Agent
 - **Structured Output**：所有 Agent 使用 LLM with_structured_output，通过 Pydantic schema 约束输出格式，替代手动 JSON 解析
@@ -499,7 +499,7 @@ TicketSolve/
 
 - **Supervisor 调度**：替代原 Router，支持并行派发多个 Agent
 - **Dispatch 并行执行**：根据 dispatched_agents 列表，asyncio.gather 并行调用
-- **DynamicCheck 动态协作**：扫描 request_help 消息，自动追加派发（最多 3 轮）
+- **DynamicCheck 动态协作**：扫描 evidence_request 消息，自动追加派发或生成 evidence_response（最多 3 轮）
 - **Aggregate 聚合推理**：综合多个 Agent 诊断结果，使用 Structured Output
 - **审批分支**：根据审批结果决定执行或终止
 - **MCP Client 初始化**：工作流创建时一次性初始化 MCP 连接，获取所有工具并按类别分组注入各 Agent
@@ -524,8 +524,11 @@ TicketSolve/
 **CommunicationBus 通信机制**：
 - `send()`：向指定 Agent 发送消息
 - `broadcast()`：广播消息给所有 Agent
+- `publish_hypothesis()`：发布可验证故障假设
+- `request_evidence()`：请求指定 Agent 补充证据
+- `respond_evidence()`：响应证据请求
 - `receive()`：获取发给指定 Agent 的消息（含广播）
-- 消息类型：diagnosis / question / request_help / disagreement
+- 消息类型：hypothesis / evidence_request / evidence_response / support / challenge / diagnosis
 
 #### 3. MCP Server (`mcp_server.py`)
 
@@ -776,11 +779,19 @@ app = workflow.compile(checkpointer=checkpointer)
 
 ### Q: Agent 间如何协作？
 
-Agent 通过 CommunicationBus 通信总线协作：
-1. 诊断 Agent 在诊断结论中指定 `need_collaboration` 列表
-2. CommunicationBus 向目标 Agent 发送 `request_help` 消息
-3. DynamicCheck 节点扫描消息，自动追加派发目标 Agent
-4. 被派发的 Agent 在下一轮 Dispatch 中执行，可接收前序 Agent 的消息
+Agent 通过 CommunicationBus 通信总线协作（证据协作协议 v1）：
+1. 诊断 Agent 发布 `hypothesis`，声明当前故障假设和证据
+   - hypothesis：一句话可验证假设，例如"Postgres 容器停止导致数据库连接失败"
+   - evidence：支持该假设的结构化证据列表，包含 source_agent、tool_name、target、status、observed、expected、supports_hypothesis、confidence
+2. 需要跨域确认时，Agent 发送 `evidence_request`
+   - 指定 target_agent（找谁帮忙）、required_evidence（需要什么证据）、reason（为什么需要）、suggested_tools（建议用什么工具查）
+3. DynamicCheck 节点扫描未响应的证据请求，自动追加派发目标 Agent
+   - 如果目标 Agent 尚未执行 → 追加派发
+   - 如果目标 Agent 已有结果且证据覆盖 → 自动生成 evidence_response
+   - 如果目标 Agent 已有结果但证据不足 → 定向重跑
+4. 如果目标 Agent 已有诊断结果，DynamicCheck 自动生成 `evidence_response`
+5. Aggregate 节点根据 hypothesis、evidence_response、support/challenge 进行冲突裁决
+   - 输出 protocol_summary，包含 winning_hypothesis_id、hypothesis_scores（support_score/tool_evidence_score/confidence_score/conflict_score/final_score）、conflicts
 
 ### Q: 如何查看工单的完整处理流程？
 

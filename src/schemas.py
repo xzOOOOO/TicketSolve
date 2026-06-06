@@ -1,4 +1,7 @@
-from pydantic import BaseModel, Field
+# field_validator：在赋值前自动校验/转换字段，这里用于把 LLM 偶尔输出的字符串证据归一化成 EvidenceItem
+from pydantic import BaseModel, Field, field_validator
+# EvidenceItem 是结构化证据对象；normalize_evidence_items 负责把字符串/字典混合格式统一成对象列表
+from evidence import EvidenceItem, normalize_evidence_items
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
@@ -65,12 +68,53 @@ class DiagnosisOutput(BaseModel):
 
     用于 DBAgent/NetAgent/AppAgent 返回诊断结论。
     三个诊断 Agent 共用此模型，因为它们输出结构完全一致。
-    对应原 parse_json_content 解析的 {"diagnosis", "possible_causes", "confidence", "need_collaboration"} 结构。
+    诊断输出同时包含结论、证据和结构化协作请求。
+
+    相比旧版本的变化：
+    - 新增 fault_type：标准化故障类型，让下游 FixAgent 能直接映射到 Action DSL（如 RECOVER_FAULT）
+    - 新增 hypothesis：一句话可验证假设，是证据协作协议的起点
+    - evidence 从 List[str] 升级为 List[EvidenceItem]，每个证据都带结构化字段
+    - 新增 collaboration_requests：Agent 主动请求其他 Agent 协助验证假设
     """
     diagnosis: str = Field(description="具体诊断结论")
     possible_causes: List[str] = Field(description="可能的原因列表")
     confidence: float = Field(description="诊断置信度，范围 0-1")
-    need_collaboration: List[str] = Field(description="需要协作的Agent名称列表，如不需要协作则为空列表")
+    # fault_type：标准化故障类型枚举值，用于后续匹配修复动作。
+    # 例如 DB_CONN_FAIL → 用 RECOVER_FAULT 动作恢复数据库连接。
+    # 如果 LLM 无法判断，允许为空，不要编造假值。
+    fault_type: Optional[str] = Field(None, description="结构化故障类型，如 DB_CONN_FAIL/APP_PROCESS_DOWN/NGINX_BAD_ROUTE；无法判断则为空")
+    # hypothesis：核心设计。一句话假设驱动后续所有协作。
+    # 好假设的标准：可验证（能用工具证实或证伪）、具体（指出哪个组件出什么问题）。
+    hypothesis: Optional[str] = Field(None, description="当前 Agent 的可验证故障假设")
+    # evidence：结构化证据列表。每个 EvidenceItem 包含 source_agent（谁发现的）、
+    # tool_name（用什么工具）、target（检查对象）、status（结果状态）、
+    # observed（实际看到什么）、expected（预期应该看到什么）、
+    # supports_hypothesis（是否支持假设）、confidence（证据可信度）。
+    # 这种结构让 Aggregate 节点可以按字段做加权计算，而不是纯文本匹配。
+    evidence: List[EvidenceItem] = Field(default_factory=list, description="支持该诊断的结构化证据列表")
+    # collaboration_requests：Agent 诊断后如果发现证据不足，可以主动向其他 Agent "下单" 请求补充证据。
+    # 每项是一个字典，必须包含：
+    #   - target_agent：找谁帮忙（仅限 db_agent/net_agent/app_agent）
+    #   - required_evidence：需要对方提供什么证据（字符串列表）
+    #   - reason：为什么需要这个证据（给 LLM 看的上下文）
+    #   - suggested_tools：建议对方用什么工具查（降低对方决策成本）
+    collaboration_requests: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="结构化协作请求列表，每项包含 target_agent/required_evidence/reason/suggested_tools",
+    )
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def _normalize_evidence(cls, value):
+        """把模型偶尔输出的短文本证据归一成结构化证据对象。
+
+        LLM with_structured_output 并不总是严格按 schema 输出 evidence：
+        - 有时会输出字符串列表（如 ["连接被拒绝"]）
+        - 有时会输出字典列表但字段不全
+        normalize_evidence_items 会统一补全缺失字段（如 source_agent、confidence），
+        保证下游消费代码拿到的是规范的 EvidenceItem 对象。
+        """
+        return normalize_evidence_items(value or [])
 
 
 class FixStepOutput(BaseModel):
@@ -134,12 +178,25 @@ class AggregateOutput(BaseModel):
 
     用于 aggregate 节点综合多个 Agent 的诊断结果。
     对应原 parse_json_content 解析的 {"diagnosis", "possible_causes", "confidence", "contributing_agents", "reasoning"} 结构。
+
+    新增 protocol_summary：把 Agent 间协作协议的结论也纳入聚合结果。
+    这样 FixAgent 不仅知道 "诊断是什么"，还知道 "这个诊断在协议中战胜了哪些竞争假设"。
     """
     diagnosis: str = Field(description="最终诊断结论")
     possible_causes: List[str] = Field(description="可能的原因列表")
     confidence: float = Field(description="诊断置信度，范围 0-1")
     contributing_agents: List[str] = Field(description="贡献诊断的Agent列表")
     reasoning: str = Field(description="聚合推理过程")
+    # protocol_summary：Agent 协作协议的统计摘要。
+    # 由 agent_protocol.build_protocol_context() 生成，包含：
+    #   - winning_hypothesis_id：得分最高的假设 ID
+    #   - hypothesis_scores：每个假设的详细得分（support_score/tool_evidence_score/confidence_score/conflict_score/final_score）
+    #   - conflicts：Agent 之间的冲突记录
+    # Aggregate 节点把这个摘要传给 LLM，让它在聚合推理时参考协议层面的共识/分歧。
+    protocol_summary: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Agent 协作协议摘要，包含 winning_hypothesis_id/hypothesis_scores/conflicts 等",
+    )
 
 
 # ============================================================

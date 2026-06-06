@@ -3,8 +3,11 @@ from agents.base import BaseAgent
 from state import SystemState
 from prompts import FIX_PROMPT
 from schemas import FixPlanOutput
-# 引入标准化 Trace 事件工厂，用于生成统一的追踪事件
+# make_trace_event：标准化 Trace 事件工厂，所有 Agent 都用同一套事件格式
 from trace_events import make_trace_event
+# build_protocol_context：从所有 Agent 消息中构建协议上下文（含假设、证据、冲突统计）
+# FixAgent 使用它来了解 Agent 间协作的结论，辅助生成更精准的修复方案
+from agent_protocol import build_protocol_context
 from logger import logger
 from config import settings
 
@@ -69,6 +72,23 @@ class FixAgent(BaseAgent):
                 diagnosis_result = state.app_agent_result
             else:
                 diagnosis_result = {}
+
+            # 构建协议上下文：从所有 Agent 消息中提取假设、证据、冲突等信息
+            # 这样 FixAgent 不仅知道 "诊断结论是什么"，还知道：
+            # - 哪个假设在协议中胜出（winning_hypothesis_id）
+            # - 各假设的得分情况（hypothesis_scores）
+            # - Agent 之间有没有冲突（conflicts）
+            # 这些信息帮助 FixAgent 生成更精准的修复方案
+            protocol_context = build_protocol_context(state.agent_messages)
+            if isinstance(diagnosis_result, dict):
+                # 把协议上下文和摘要注入诊断结果，一起传给 LLM
+                # protocol_context["text"] 是人可读的文本摘要
+                # protocol_context["protocol_summary"] 是结构化的统计字典
+                diagnosis_result = {
+                    **diagnosis_result,
+                    "protocol_context": protocol_context.get("text"),
+                    "protocol_summary": protocol_context.get("protocol_summary"),
+                }
 
             logger.info(f"[{self.name}] 开始生成修复方案: diagnosis_type={diagnosis_type}")
 

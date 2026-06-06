@@ -165,47 +165,50 @@
       "数据查不出来"
     ],
     "tool_evidence": [
-      "check_db_connection: [{'type': 'text', 'text': '{\"tool\": \"check_db_connection\", \"status\": \"ok\", \"container\": {\"container\": \"srebench-postgres\", \"exists\": true, \"status\": \"running\", \"running\": true, \"exit_code\": 0, \"error\": \"\"}, \"tcp_probe\": {\"target\": \"localhost:15432\", \"status\": \"reachable\", \"latency_ms\": 9}, \"query_result\": [[1]], \"evidence\": [\"postgres container, port and query are healthy\"], \"suggested_domain\": \"db_agent\", \"timestamp\": 1780591496.527}', 'id': 'lc_b81dab8f-fe9f-40f5-8928-107563c0f18c'}]",
-      "check_db_slow_query: [{'type': 'text', 'text': '{\"tool\": \"check_db_slow_query\", \"status\": \"ok\", \"index_exists\": true, \"http_probe\": {\"url\": \"http://localhost:18080/orders/pending\", \"status\": \"ok\", \"http_status\": 200, \"elapsed_ms\": 378, \"body\": \"{\\\\\"count\\\\\":50,\\\\\"elapsed_ms\\\\\":91,\\\\\"items\\\\\":[{\\\\\"id\\\\\":5,\\\\\"status\\\\\":\\\\\"pending\\\\\",\\\\\"amount\\\\\":475.72},{\\\\\"id\\\\\":10,\\\\\"status\\\\\":\\\\\"pending\\\\\",\\\\\"amount\\\\\":467.39},{\\\\\"id\\\\\":15,\\\\\"status\\\\\":\\\\\"pending\\\\\",\\\\\"amount\\\\\":290.74},{\\\\\"id\\\\\":20,\\\\\"status\\\\\":\\\\\"pending\\\\\",\\\\\"am",
-      "check_db_deadlock: [{'type': 'text', 'text': '{\"tool\": \"check_db_deadlock\", \"status\": \"ok\", \"lock_waits\": [], \"evidence\": [\"no lock waits detected\"], \"error\": null, \"suggested_domain\": \"db_agent\", \"timestamp\": 1780591500.742}', 'id': 'lc_27d47c5c-41c9-4899-8552-ec18db920278'}]",
-      "check_app_redis_connection: [{'type': 'text', 'text': '{\"tool\": \"check_app_redis_connection\", \"status\": \"failed\", \"container\": {\"container\": \"srebench-redis\", \"exists\": true, \"status\": \"exited\", \"running\": false, \"exit_code\": 0, \"error\": \"\"}, \"tcp_probe\": {\"target\": \"localhost:16379\", \"status\": \"unreachable\", \"latency_ms\": null, \"error\": \"[WinError 10061] 由于目标计算机积极拒绝，无法连接。\"}, \"cache_endpoint_probe\": {\"url\": \"http://localhost:18080/cache/ping\", \"status\": \"failed\", \"http_status\": 503, \"elapsed_ms\": 4102, \"error\": \"Service Un",
-      "check_app_health: [{'type': 'text', 'text': '{\"tool\": \"check_app_health\", \"status\": \"ok\", \"container\": {\"container\": \"srebench-app\", \"exists\": true, \"status\": \"running\", \"running\": true, \"exit_code\": 0, \"error\": \"\"}, \"http_probe\": {\"url\": \"http://localhost:18081/health\", \"status\": \"ok\", \"http_status\": 200, \"elapsed_ms\": 4077, \"body\": \"{\\\\\"status\\\\\":\\\\\"degraded\\\\\",\\\\\"checks\\\\\":{\\\\\"db\\\\\":\\\\\"ok\\\\\",\\\\\"redis\\\\\":\\\\\"failed: Error -5 connecting to redis:6379. No address associated with hostname.\\\\\"}}\"}, \"evidence\": [\"app"
+      "check_db_connection: [{'type': 'text', 'text': '{\"tool\": \"check_db_connection\", \"status\": \"failed\", \"container\": {\"container\": \"srebench-postgres\", \"exists\": true, \"status\": \"exited\", \"running\": false, \"exit_code\": 0, \"error\": \"\"}, \"tcp_probe\": {\"target\": \"localhost:15432\", \"status\": \"unreachable\", \"latency_ms\": null, \"error\": \"[WinError 10061] 由于目标计算机积极拒绝，无法连接。\"}, \"query_result\": null, \"evidence\": [\"container srebench-postgres is not running\", \"tcp probe failed: [WinError 10061] 由于目标计算机积极拒绝，无法连接。\", \"database query ",
+      "check_db_slow_query: [{'type': 'text', 'text': '{\"tool\": \"check_db_slow_query\", \"status\": \"slow_or_failed\", \"index_exists\": false, \"http_probe\": {\"url\": \"http://localhost:18080/orders/pending\", \"status\": \"failed\", \"http_status\": 503, \"elapsed_ms\": 4030, \"error\": \"Service Unavailable\"}, \"evidence\": [\"failed to inspect indexes: connection to server at \\\\\"localhost\\\\\" (::1), port 15432 failed: Connection refused (0x0000274D/10061)\\\\n\\\\tIs the server running on that host and accepting TCP/IP connections?\\\\nconnection to",
+      "check_db_deadlock: [{'type': 'text', 'text': '{\"tool\": \"check_db_deadlock\", \"status\": \"ok\", \"lock_waits\": [], \"evidence\": [\"no lock waits detected\"], \"error\": \"connection to server at \\\\\"localhost\\\\\" (::1), port 15432 failed: Connection refused (0x0000274D/10061)\\\\n\\\\tIs the server running on that host and accepting TCP/IP connections?\\\\nconnection to server at \\\\\"localhost\\\\\" (127.0.0.1), port 15432 failed: Connection refused (0x0000274D/10061)\\\\n\\\\tIs the server running on that host and accepting TCP/IP connecti",
+      "check_network_http_route: [{'type': 'text', 'text': '{\"tool\": \"check_network_http_route\", \"status\": \"ok\", \"nginx_container\": {\"container\": \"srebench-nginx\", \"exists\": true, \"status\": \"running\", \"running\": true, \"exit_code\": 0, \"error\": \"\"}, \"direct_app_probe\": {\"url\": \"http://localhost:18081/health\", \"status\": \"ok\", \"http_status\": 200, \"elapsed_ms\": 4031, \"body\": \"{\\\\\"status\\\\\":\\\\\"degraded\\\\\",\\\\\"checks\\\\\":{\\\\\"db\\\\\":\\\\\"failed: could not translate host name \\\\\\\\\\\\\"postgres\\\\\\\\\\\\\" to address: No address associated with host",
+      "check_app_health: [{'type': 'text', 'text': '{\"tool\": \"check_app_health\", \"status\": \"ok\", \"container\": {\"container\": \"srebench-app\", \"exists\": true, \"status\": \"running\", \"running\": true, \"exit_code\": 0, \"error\": \"\"}, \"http_probe\": {\"url\": \"http://localhost:18081/health\", \"status\": \"ok\", \"http_status\": 200, \"elapsed_ms\": 4025, \"body\": \"{\\\\\"status\\\\\":\\\\\"degraded\\\\\",\\\\\"checks\\\\\":{\\\\\"db\\\\\":\\\\\"failed: could not translate host name \\\\\\\\\\\\\"postgres\\\\\\\\\\\\\" to address: No address associated with hostname\\\\\\\\n\\\\\",\\\\\"redis\\",
+      "check_app_redis_connection: [{'type': 'text', 'text': '{\"tool\": \"check_app_redis_connection\", \"status\": \"ok\", \"container\": {\"container\": \"srebench-redis\", \"exists\": true, \"status\": \"running\", \"running\": true, \"exit_code\": 0, \"error\": \"\"}, \"tcp_probe\": {\"target\": \"localhost:16379\", \"status\": \"reachable\", \"latency_ms\": 5}, \"cache_endpoint_probe\": {\"url\": \"http://localhost:18080/cache/ping\", \"status\": \"ok\", \"http_status\": 200, \"elapsed_ms\": 21, \"body\": \"{\\\\\"status\\\\\":\\\\\"ok\\\\\",\\\\\"value\\\\\":\\\\\"1780740208.586828\\\\\"}\"}, \"evidence\"",
+      "check_app_process: [{'type': 'text', 'text': '{\"tool\": \"check_app_process\", \"process\": \"app\", \"status\": \"running\", \"container\": {\"container\": \"srebench-app\", \"exists\": true, \"status\": \"running\", \"running\": true, \"exit_code\": 0, \"error\": \"\"}, \"recent_logs\": \"INFO:     172.19.0.1:51670 - \\\\\"GET /health HTTP/1.1\\\\\" 200 OK\\\\nINFO:     172.19.0.5:34206 - \\\\\"GET /cache/ping HTTP/1.0\\\\\" 200 OK\\\\nINFO:     172.19.0.5:58724 - \\\\\"GET /orders/pending HTTP/1.0\\\\\" 200 OK\\\\nINFO:     172.19.0.5:50604 - \\\\\"GET /orders/pending HT",
+      "check_app_port: [{'type': 'text', 'text': '{\"tool\": \"check_app_port\", \"port\": 18081, \"target\": \"localhost:18081\", \"status\": \"reachable\", \"latency_ms\": 10, \"suggested_domain\": \"app_agent\", \"timestamp\": 1780740211.729}', 'id': 'lc_7ca1377e-c8e7-45ed-8435-ff5e36f997b6'}]"
     ],
-    "root_cause": "Redis服务容器异常退出导致缓存组件不可用，应用健康检查显示Redis连接失败且数据库正常，直接引发数据查询链路中断。",
+    "root_cause": "PostgreSQL 数据库容器已异常退出（状态为 exited），导致数据库服务不可用。该故障直接引发底层 TCP 端口拒绝连接，并触发 Docker 内部 DNS 服务发现机制失效，致使应用层无法解析数据库主机名 'postgres' 并建立连接，最终导致数据查询服务完全中断。",
     "possible_causes": [
-      "Redis容器异常退出或未被正确启动",
-      "Redis容器配置错误或宿主机资源不足导致启动失败",
-      "Docker网络或DNS配置异常，导致应用无法解析Redis服务主机名",
-      "应用层未配置合理的Redis降级/回源策略，缓存不可用时直接阻断数据查询"
+      "PostgreSQL 容器因资源限制（如 OOM）、配置错误或健康检查机制触发而意外退出",
+      "数据库进程崩溃或启动参数异常导致服务未能正常拉起",
+      "Docker 内部 DNS 缓存未同步或网络插件异常加剧了服务名解析失败",
+      "手动停止服务、维护操作或编排策略（如重启失败）导致容器未恢复"
     ],
     "successful_repair_action": {
       "step_id": 1,
-      "action": "启动异常退出的 Redis 服务容器",
+      "action": "启动 PostgreSQL 数据库容器",
       "action_type": "START_CONTAINER",
-      "target": "srebench-redis",
-      "command": "docker start srebench-redis"
+      "target": "srebench-postgres",
+      "command": "docker start srebench-postgres"
     },
     "successful_repair_actions": [
       {
         "step_id": 1,
-        "action": "启动异常退出的 Redis 服务容器",
+        "action": "启动 PostgreSQL 数据库容器",
         "action_type": "START_CONTAINER",
-        "target": "srebench-redis",
-        "command": "docker start srebench-redis"
+        "target": "srebench-postgres",
+        "command": "docker start srebench-postgres"
       },
       {
         "step_id": 2,
-        "action": "验证 Redis 缓存组件连通性",
-        "action_type": "HTTP_PROBE",
-        "target": "http://localhost:18080/cache/ping",
-        "command": "curl http://localhost:18080/cache/ping"
+        "action": "恢复数据库连接故障状态",
+        "action_type": "RECOVER_FAULT",
+        "target": "DB_CONN_FAIL",
+        "command": "python lab/chaos.py recover DB_CONN_FAIL"
       },
       {
         "step_id": 3,
-        "action": "验证业务数据查询链路恢复",
+        "action": "验证数据库连接与应用健康状态",
         "action_type": "HTTP_PROBE",
-        "target": "http://localhost:18080/orders/pending",
-        "command": "curl http://localhost:18080/orders/pending"
+        "target": "http://localhost:18080/health",
+        "command": "curl http://localhost:18080/health"
       }
     ],
     "verification": {
@@ -225,32 +228,32 @@
             "success": true,
             "body": "{\"status\":\"ok\",\"checks\":{\"db\":\"ok\",\"redis\":\"ok\"}}",
             "error": "",
-            "checked_at": "2026-06-04T17:26:27.586079+00:00"
+            "checked_at": "2026-06-06T10:11:32.661636+00:00"
           },
           {
             "name": "cache_ping",
             "url": "http://localhost:18080/cache/ping",
             "status_code": 200,
             "success": true,
-            "body": "{\"status\":\"ok\",\"value\":\"1780593987.60788\"}",
+            "body": "{\"status\":\"ok\",\"value\":\"1780740692.6678464\"}",
             "error": "",
-            "checked_at": "2026-06-04T17:26:27.586079+00:00"
+            "checked_at": "2026-06-06T10:11:32.661636+00:00"
           },
           {
             "name": "orders_pending",
             "url": "http://localhost:18080/orders/pending",
             "status_code": 200,
             "success": true,
-            "body": "{\"count\":50,\"elapsed_ms\":13,\"items\":[{\"id\":5,\"status\":\"pending\",\"amount\":475.72},{\"id\":10,\"status\":\"pending\",\"amount\":467.39},{\"id\":15,\"status\":\"pending\",\"amount\":290.74},{\"id\":20,\"status\":\"pending\",\"amount\":175.51},{\"id\":25,\"status\":\"pending\",\"amount\":117.96},{\"id\":30,\"status\":\"pending\",\"amount\":340.28},{\"id\":35,\"status\":\"pending\",\"amount\":135.63},{\"id\":40,\"status\":\"pending\",\"amount\":343.21},{\"id\":45,\"status\":\"pending\",\"amount\":421.2},{\"id\":50,\"status\":\"pending\",\"amount\":75.84},{\"id\":55,\"status\":\"pending\",\"amount\":182.29},{\"id\":60,\"status\":\"pending\",\"amount\":384.5},{\"id\":65,\"status\":\"pending\",\"amount\":387.18},{\"id\":70,\"status\":\"pending\",\"amount\":207.94},{\"id\":75,\"status\":\"pending\",\"amount\":1.89},{\"id\":80,\"status\":\"pending\",\"amount\":234.74},{\"id\":85,\"status\":\"pending\",\"amount\":296.4},{\"id\":90,\"status\":\"pending\",\"amount\":263.36},{\"id\":95,\"status\":\"pending\",\"amount\":194.84},{\"id\":100,\"status\":\"pending\",\"amount\":482.93},{\"id\":105,\"status\":\"pending\",\"amount\":18.69},{\"id\":110,\"status\":\"pend",
+            "body": "{\"count\":50,\"elapsed_ms\":18,\"items\":[{\"id\":5,\"status\":\"pending\",\"amount\":475.72},{\"id\":10,\"status\":\"pending\",\"amount\":467.39},{\"id\":15,\"status\":\"pending\",\"amount\":290.74},{\"id\":20,\"status\":\"pending\",\"amount\":175.51},{\"id\":25,\"status\":\"pending\",\"amount\":117.96},{\"id\":30,\"status\":\"pending\",\"amount\":340.28},{\"id\":35,\"status\":\"pending\",\"amount\":135.63},{\"id\":40,\"status\":\"pending\",\"amount\":343.21},{\"id\":45,\"status\":\"pending\",\"amount\":421.2},{\"id\":50,\"status\":\"pending\",\"amount\":75.84},{\"id\":55,\"status\":\"pending\",\"amount\":182.29},{\"id\":60,\"status\":\"pending\",\"amount\":384.5},{\"id\":65,\"status\":\"pending\",\"amount\":387.18},{\"id\":70,\"status\":\"pending\",\"amount\":207.94},{\"id\":75,\"status\":\"pending\",\"amount\":1.89},{\"id\":80,\"status\":\"pending\",\"amount\":234.74},{\"id\":85,\"status\":\"pending\",\"amount\":296.4},{\"id\":90,\"status\":\"pending\",\"amount\":263.36},{\"id\":95,\"status\":\"pending\",\"amount\":194.84},{\"id\":100,\"status\":\"pending\",\"amount\":482.93},{\"id\":105,\"status\":\"pending\",\"amount\":18.69},{\"id\":110,\"status\":\"pend",
             "error": "",
-            "checked_at": "2026-06-04T17:26:27.587086+00:00"
+            "checked_at": "2026-06-06T10:11:32.662970+00:00"
           }
         ],
-        "recovered_at": "2026-06-04T17:26:27.623054+00:00"
+        "recovered_at": "2026-06-06T10:11:32.699345+00:00"
       }
     },
     "source_ticket_id": "TKT-013",
-    "created_at": "2026-06-04T17:26:27.630621+00:00",
-    "updated_at": "2026-06-04T17:26:27.630621+00:00"
+    "created_at": "2026-06-06T10:11:32.700959+00:00",
+    "updated_at": "2026-06-06T10:11:32.713860+00:00"
   }
 ]

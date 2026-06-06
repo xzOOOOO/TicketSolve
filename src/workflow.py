@@ -14,7 +14,7 @@ LangGraph 工作流定义 - Multi-Agent 架构
 - Supervisor 替代原 Router，支持并行派发多个 Agent
 - CaseMemory 检索历史相似案例，供 Supervisor/FixAgent 复用
 - Dispatch 节点并行执行被派发的 Agent
-- DynamicCheck 节点扫描 Agent 间 request_help 消息，动态追加派发
+- DynamicCheck 节点扫描 Agent 间 evidence_request 消息，动态追加派发或自动补证据响应
 - Aggregate 节点综合多个 Agent 的诊断结果
 - Fix Agent 优先使用聚合诊断结果
 - RepairPlanner 规范化 Action DSL 并生成可审计命令

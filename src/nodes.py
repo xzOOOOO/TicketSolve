@@ -18,6 +18,21 @@ from langgraph.errors import GraphInterrupt
 from database import AsyncSessionLocal, save_ticket
 from guardrail import run_guardrail
 from action_dsl import ActionDSLValidationError, compile_rollback_action, compile_step_action
+# agent_protocol 模块：证据协作协议的核心工具函数
+# - agent_result_covers_request：判断 Agent 的诊断结果是否覆盖了证据请求要求的证据项
+# - auto_response_from_agent_result：用已有诊断结果自动生成 evidence_response 消息
+# - build_protocol_context：从所有消息中构建协议上下文（含统计摘要）
+# - has_response_for：检查某条 evidence_request 是否已有对应的 evidence_response
+# - normalize_messages：把 state 中存储的字典消息归一化成标准格式
+# - pending_requests_for：找出某个 Agent 尚未响应的证据请求列表
+from agent_protocol import (
+    agent_result_covers_request,
+    auto_response_from_agent_result,
+    build_protocol_context,
+    has_response_for,
+    normalize_messages,
+    pending_requests_for,
+)
 from case_library import (
     DEFAULT_CASE_LIBRARY_PATH,
     format_case_context,
@@ -126,23 +141,32 @@ def create_dispatch_node(agent_runners: dict[str, Callable[[SystemState], Awaita
 
     async def dispatch_node(state: SystemState) -> dict:
         dispatched = state.dispatched_agents
+        force_dispatched = set(state.force_dispatched_agents or [])
 
         if not dispatched:
             logger.info("[Dispatch] 无 Agent 被派发，跳过诊断")
-            return {"messages": ["Dispatch: 无需诊断Agent，直接处理"]}
+            return {
+                "force_dispatched_agents": [],
+                "messages": ["Dispatch: 无需诊断Agent，直接处理"],
+            }
 
         to_run = []
         for agent_name in dispatched:
             field = _result_fields.get(agent_name)
             already_done = field and getattr(state, field, None) is not None
-            if already_done:
+            if already_done and agent_name not in force_dispatched:
                 logger.info(f"[Dispatch] {agent_name} 已有结果，跳过本轮执行")
             else:
+                if already_done and agent_name in force_dispatched:
+                    logger.info(f"[Dispatch] {agent_name} 被证据请求强制重跑")
                 to_run.append(agent_name)
 
         if not to_run:
             logger.info("[Dispatch] 所有被派发 Agent 均已有结果，跳过")
-            return {"messages": ["Dispatch: 所有Agent已完成，无需重复执行"]}
+            return {
+                "force_dispatched_agents": [],
+                "messages": ["Dispatch: 所有Agent已完成，无需重复执行"],
+            }
 
         logger.info(f"[Dispatch] 并行派发 Agent: {to_run} (轮次 {state.dispatch_round + 1})")
 
@@ -162,7 +186,11 @@ def create_dispatch_node(agent_runners: dict[str, Callable[[SystemState], Awaita
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        merged = {"messages": [], "dispatch_round": state.dispatch_round + 1}
+        merged = {
+            "messages": [],
+            "dispatch_round": state.dispatch_round + 1,
+            "force_dispatched_agents": [],
+        }
         for agent_name, result in zip(agent_names, results):
             if isinstance(result, Exception):
                 logger.error(f"[Dispatch] Agent {agent_name} 执行异常: {result}")
@@ -191,37 +219,111 @@ def create_dispatch_node(agent_runners: dict[str, Callable[[SystemState], Awaita
 
 def create_dynamic_check_node():
     """
-    创建动态检查节点
+    创建动态检查节点（证据协作协议的核心调度器）
 
-    扫描 agent_messages 中的 request_help 消息，提取需要追加派发的 Agent。
-    如果存在未执行的请求且未超过最大轮次，则更新 dispatched_agents 进入下一轮 dispatch。
-    否则进入 aggregate 节点。
+    扫描 agent_messages 中尚未响应的 evidence_request，根据目标 Agent 的状态做三种处理：
+
+    1. 目标 Agent 尚未执行（无诊断结果）：
+       → 追加派发该 Agent，让它去执行诊断
+
+    2. 目标 Agent 已有结果，且证据覆盖了请求要求的证据项：
+       → 自动生成 evidence_response，避免重复执行 Agent
+
+    3. 目标 Agent 已有结果，但证据覆盖不足：
+       → 定向重跑该 Agent（加入 force_dispatched_agents），让它重新诊断
+       → 用 redispatched_request_ids 防止同一个请求被无限重跑
+
+    防循环设计：
+    - dispatch_round < max_dispatch_rounds 时才允许追加派发/重跑
+    - 已达最大轮次时，只生成 auto_responses，不再追加派发
     """
     async def dynamic_check_node(state: SystemState) -> dict:
-        if state.dispatch_round >= state.max_dispatch_rounds:
-            logger.info(
-                f"[DynamicCheck] 已达最大轮次 {state.max_dispatch_rounds}，进入聚合"
-            )
-            return {"dispatched_agents": []}
-
-        requested = set()
-        for msg in state.agent_messages:
-            if msg.get("msg_type") == "request_help":
-                receiver = msg.get("receiver", "")
-                if receiver in {"db_agent", "net_agent", "app_agent"}:
-                    requested.add(receiver)
-
+        # Agent 名称 → state 结果字段的映射，用于快速查找某 Agent 是否已有诊断结果
         _result_fields = {
             "db_agent": "db_agent_result",
             "net_agent": "net_agent_result",
             "app_agent": "app_agent_result",
         }
 
+        # 归一化所有消息，确保字段格式统一（处理旧消息可能缺失的字段）
+        normalized_messages = normalize_messages(state.agent_messages)
+        # auto_responses：自动生成的 evidence_response 消息列表
+        auto_responses = []
+        # requested：需要被派发的 Agent 集合（包括首次派发和重跑）
+        requested = set()
+        # force_requested：需要强制重跑的 Agent 集合（证据覆盖不足时）
+        force_requested = set()
+        # 已经触发过重跑的请求 ID 集合，防止无限循环
+        already_redispatched = set(state.redispatched_request_ids or [])
+        # 本轮新触发重跑的请求 ID 列表，会返回给 state 追加记录
+        new_redispatched_request_ids = []
+        # 是否允许继续调度（未达最大轮次）
+        can_redispatch = state.dispatch_round < state.max_dispatch_rounds
+
+        # 遍历每个 Agent，检查它是否有待响应的证据请求
+        for agent_name, result_field in _result_fields.items():
+            # pending_requests_for：找出发给该 Agent 且尚未有 response 的 evidence_request
+            for request in pending_requests_for(agent_name, normalized_messages):
+                # 如果这条请求已经被 auto_responses 响应过了，跳过
+                if has_response_for(request, normalized_messages + auto_responses):
+                    continue
+
+                # 获取该 Agent 当前的诊断结果
+                agent_result = getattr(state, result_field, None)
+                if agent_result:
+                    # Agent 已有结果：判断证据是否覆盖了请求要求的证据项
+                    request_id = request.get("message_id")
+                    covers_request = agent_result_covers_request(agent_result, request)
+
+                    if not covers_request and request_id not in already_redispatched and can_redispatch:
+                        # 场景 3：证据覆盖不足，且没重跑过，且还能调度 → 定向重跑
+                        requested.add(agent_name)
+                        force_requested.add(agent_name)
+                        new_redispatched_request_ids.append(request_id)
+                        logger.info(
+                            f"[DynamicCheck] 旧结果未覆盖证据请求，定向重派发: "
+                            f"request={request_id} responder={agent_name}"
+                        )
+                        continue
+
+                    # 场景 2：证据已覆盖（或无法重跑了）→ 自动生成 evidence_response
+                    response = auto_response_from_agent_result(
+                        agent_name=agent_name,
+                        agent_result=agent_result,
+                        request_message=request,
+                        # supports_override：如果证据覆盖不足，强制设为 False（表示不支持假设）
+                        supports_override=False if not covers_request else None,
+                    )
+                    auto_responses.append(response)
+                    logger.info(
+                        f"[DynamicCheck] 自动生成证据响应: request={request.get('message_id')} "
+                        f"responder={agent_name} coverage={covers_request}"
+                    )
+                else:
+                    # 场景 1：Agent 还没执行过 → 追加派发
+                    requested.add(agent_name)
+
+        # 已达最大调度轮次：不再追加派发，只返回自动生成的响应
+        if state.dispatch_round >= state.max_dispatch_rounds:
+            logger.info(
+                f"[DynamicCheck] 已达最大轮次 {state.max_dispatch_rounds}，进入聚合"
+            )
+            result = {
+                "dispatched_agents": [],
+                "messages": ["DynamicCheck: 达到最大轮次，停止追加派发"],
+            }
+            if auto_responses:
+                result["agent_messages"] = auto_responses
+                result["messages"].append(f"DynamicCheck: 自动补充 {len(auto_responses)} 条证据响应")
+            return result
+
+        # 从 requested 中筛选出真正需要派发的 Agent
+        # 规则：如果 Agent 已有结果且不在 force_requested 中，则不需要再跑
         new_dispatch = []
         for agent_name in requested:
             field = _result_fields.get(agent_name)
             already_done = field and getattr(state, field, None) is not None
-            if not already_done:
+            if not already_done or agent_name in force_requested:
                 new_dispatch.append(agent_name)
 
         if new_dispatch:
@@ -229,10 +331,30 @@ def create_dynamic_check_node():
                 f"[DynamicCheck] 发现协作请求，追加派发: {new_dispatch} "
                 f"(轮次 {state.dispatch_round}/{state.max_dispatch_rounds})"
             )
-            return {"dispatched_agents": new_dispatch}
+            result = {
+                "dispatched_agents": new_dispatch,
+                # force_dispatched_agents：Dispatch 节点看到这些 Agent 会强制重跑（忽略缓存）
+                "force_dispatched_agents": sorted(force_requested & set(new_dispatch)),
+                "messages": [f"DynamicCheck: 追加派发 {new_dispatch}"],
+            }
+            if new_redispatched_request_ids:
+                # redispatched_request_ids 用 operator.add 追加到 state，防止下次再重跑
+                result["redispatched_request_ids"] = new_redispatched_request_ids
+                result["messages"].append(
+                    f"DynamicCheck: {len(new_redispatched_request_ids)} 个请求因证据覆盖不足触发定向重跑"
+                )
+            if auto_responses:
+                result["agent_messages"] = auto_responses
+                result["messages"].append(f"DynamicCheck: 自动补充 {len(auto_responses)} 条证据响应")
+            return result
 
+        # 没有任何协作请求需要处理，直接进入聚合
         logger.info("[DynamicCheck] 无协作请求，进入聚合")
-        return {"dispatched_agents": []}
+        result = {"dispatched_agents": [], "messages": ["DynamicCheck: 无需追加派发"]}
+        if auto_responses:
+            result["agent_messages"] = auto_responses
+            result["messages"].append(f"DynamicCheck: 自动补充 {len(auto_responses)} 条证据响应")
+        return result
 
     return dynamic_check_node
 
@@ -244,11 +366,22 @@ def create_aggregate_node(llm, communication_bus=None):
     - 只有一个 Agent 返回结果 → 直接采用
     - 多个 Agent 返回结果 → LLM 聚合推理，加权判断
 
+    v1 协议增强：
+    - 引入 protocol_context：把 Agent 间协作协议的假设、证据、冲突也纳入聚合输入
+    - LLM 不仅看诊断结论，还看 "哪个假设在协议中胜出"、"有哪些支持/反对证据"
+    - 聚合结果包含 protocol_summary，供 FixAgent 参考
+
     Args:
         llm: LLM 实例，用于聚合推理
         communication_bus: CommunicationBus 实例（可选），用于读取 Agent 间通信消息
     """
     async def aggregate_node(state: SystemState) -> dict:
+        # 构建协议上下文：从所有 Agent 消息中提取假设、证据请求、响应、冲突等
+        # protocol_context["text"] 是人可读的文本摘要，会拼接到 LLM 输入中
+        # protocol_context["protocol_summary"] 是结构化的统计字典，会写入聚合结果
+        protocol_context = build_protocol_context(state.agent_messages)
+        protocol_summary = protocol_context.get("protocol_summary", {})
+
         # 收集各 Agent 的诊断结果
         agent_results = {}
         if state.db_agent_result:
@@ -287,6 +420,7 @@ def create_aggregate_node(llm, communication_bus=None):
                 "confidence": 0.7,
                 "contributing_agents": [agent_name],
                 "reasoning": f"仅 {agent_name} 返回诊断结果，直接采用",
+                "protocol_summary": protocol_summary,
             }
             return {
                 "aggregated_diagnosis": aggregated,
@@ -296,7 +430,11 @@ def create_aggregate_node(llm, communication_bus=None):
                     agent_name="aggregate",
                     input_data={"contributing_agents": [agent_name]},
                     output_data=aggregated,
-                    metadata={"dispatch_round": state.dispatch_round},
+                    metadata={
+                        "dispatch_round": state.dispatch_round,
+                        # 单 Agent 场景也把 protocol_summary 带上，保持输出格式一致
+                        "protocol_summary": protocol_summary,
+                    },
                 )],
                 "messages": [f"Aggregate: 采用 {agent_name} 的诊断结论"],
             }
@@ -305,18 +443,27 @@ def create_aggregate_node(llm, communication_bus=None):
         logger.info(f"[Aggregate] 聚合 {len(agent_results)} 个 Agent 的诊断结果: {list(agent_results.keys())}")
 
         try:
+            # 把各 Agent 的诊断结果拼接成文本，作为 LLM 的输入
             results_str = ""
             for name, result in agent_results.items():
                 results_str += f"\n--- {name} ---\n"
                 results_str += f"诊断: {result.get('diagnosis', '未知')}\n"
                 results_str += f"可能原因: {result.get('possible_causes', [])}\n"
+                results_str += f"故障类型: {result.get('fault_type')}\n"
+                results_str += f"假设: {result.get('hypothesis')}\n"
+                results_str += f"证据: {result.get('evidence', [])}\n"
 
+            # 如果传入了 communication_bus，读取发给 aggregate 的消息（广播消息）
             if communication_bus and state.agent_messages:
                 relevant_msgs = communication_bus.receive("aggregate", state.agent_messages)
                 if relevant_msgs:
                     results_str += "\n--- Agent 间通信 ---\n"
                     for msg in relevant_msgs:
                         results_str += f"[{msg['sender']}→{msg['receiver']}] ({msg['msg_type']}, 置信度:{msg.get('confidence', 0)}) {msg['content']}\n"
+            # 把协议上下文也拼接到输入中，让 LLM 知道各 Agent 的假设谁支持、谁反对
+            if state.agent_messages:
+                results_str += "\n--- 结构化协作协议上下文 ---\n"
+                results_str += protocol_context.get("text", "无结构化协作消息。")
 
             # 使用 Structured Output 进行聚合推理
             # 在函数内部创建 structured_llm（因为 aggregate 是函数式节点，无 __init__）
@@ -338,6 +485,10 @@ def create_aggregate_node(llm, communication_bus=None):
             else:
                 # Pydantic 对象转 dict，保持与 SystemState 的兼容性
                 aggregated = result.model_dump()
+            # 兜底：如果 LLM 没有输出 protocol_summary，把协议上下文中的摘要补进去
+            # 这样 FixAgent 始终能拿到协议层面的统计信息
+            if not aggregated.get("protocol_summary"):
+                aggregated["protocol_summary"] = protocol_summary
 
             logger.info(
                 f"[Aggregate] 聚合完成: diagnosis={aggregated.get('diagnosis')}, "
@@ -354,10 +505,14 @@ def create_aggregate_node(llm, communication_bus=None):
                     "diagnosis": aggregated.get("diagnosis"),
                     "confidence": aggregated.get("confidence"),
                     "reasoning": aggregated.get("reasoning"),
+                    # 把协议摘要也记入审计日志，方便事后追溯 "为什么选了这个诊断"
+                    "protocol_summary": aggregated.get("protocol_summary"),
                 },
                 "input_context": {
                     "agent_results": results_str,
                     "symptom": state.symptom,
+                    # 把完整的协议上下文也记入输入，审计时能还原当时的协作全貌
+                    "protocol_context": protocol_context,
                 },
                 "output_result": aggregated,
                 "dispatch_round": state.dispatch_round,
@@ -372,7 +527,10 @@ def create_aggregate_node(llm, communication_bus=None):
                     agent_name="aggregate",
                     input_data={"contributing_agents": list(agent_results.keys())},
                     output_data=aggregated,
-                    metadata={"dispatch_round": state.dispatch_round},
+                    metadata={
+                        "dispatch_round": state.dispatch_round,
+                        "protocol_summary": aggregated.get("protocol_summary"),
+                    },
                 )],
                 "messages": [
                     f"Aggregate: 综合诊断={aggregated.get('diagnosis')}, "
@@ -390,6 +548,7 @@ def create_aggregate_node(llm, communication_bus=None):
                     "confidence": 0.0,
                     "contributing_agents": list(agent_results.keys()),
                     "reasoning": f"异常: {str(e)}",
+                    "protocol_summary": protocol_summary,
                 },
                 "trace_events": [make_trace_event(
                     "diagnosis_generated",

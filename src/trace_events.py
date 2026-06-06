@@ -50,10 +50,13 @@ def make_trace_event(
     - metadata: 附加元数据（可选）
     - timestamp: 时间戳（可选，默认取当前 UTC 时间）
     """
+    # 校验事件类型：如果传了不认识的 event_type，立即抛异常
+    # 双语错误信息：英文在前方便日志搜索，中文在后方便人读
     if event_type not in STANDARD_EVENT_TYPES:
-        raise ValueError(f"不支持的标准事件类型: {event_type}")
+        raise ValueError(f"Unsupported trace event_type: {event_type}（不支持的标准事件类型）")
+    # 校验状态值：只允许 success/failure/pending/skipped 四种
     if status not in TRACE_STATUSES:
-        raise ValueError(f"不支持的状态值: {status}")
+        raise ValueError(f"Unsupported trace status: {status}（不支持的状态值）")
 
     return {
         "schema_version": TRACE_SCHEMA_VERSION,
