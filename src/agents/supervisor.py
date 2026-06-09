@@ -1,11 +1,18 @@
+# BaseChatModel：LangChain 聊天模型基类
 from langchain_core.language_models import BaseChatModel
+# BaseAgent：Agent 抽象基类
 from agents.base import BaseAgent
+# SystemState：工作流全局状态
 from state import SystemState
+# SUPERVISOR_PROMPT：Supervisor 的 LLM Prompt 模板
 from prompts import SUPERVISOR_PROMPT
+# SupervisorDecisionOutput：Supervisor 决策的结构化输出模型
 from schemas import SupervisorDecisionOutput
-# 引入标准化 Trace 事件工厂，用于生成统一的追踪事件
+# make_trace_event：标准化 Trace 事件工厂
 from trace_events import make_trace_event
+# logger：项目统一日志记录器
 from logger import logger
+# settings：项目配置对象
 from config import settings
 
 

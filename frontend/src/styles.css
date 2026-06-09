@@ -362,6 +362,189 @@ button:disabled {
   gap: 16px;
 }
 
+/* 流程总览布局：关键结论和动作分列展示 */
+.process-layout {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr);
+}
+
+/* 当前进展面板：突出主诊断，不展示大段 JSON */
+.process-hero {
+  border-left: 4px solid #2f7d68;
+}
+
+/* 当前诊断文本：给第一屏一个明确阅读锚点 */
+.process-hero__diagnosis {
+  color: #1f2b24;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.55;
+  margin: 0 0 16px;
+  overflow-wrap: anywhere;
+}
+
+/* 处理动作面板：承载审批或状态说明 */
+.process-action {
+  align-content: start;
+  display: grid;
+  gap: 12px;
+}
+
+/* 纵向审批表单：流程总览里空间更窄，使用单列 */
+.approval-form--stacked {
+  grid-template-columns: 1fr;
+}
+
+/* 主流程轨道：按业务顺序展示关键阶段 */
+.stage-rail {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(6, minmax(130px, 1fr));
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+/* 流程阶段卡：固定最小高度，避免状态变化时跳动 */
+.stage-card {
+  background: #fbfcfa;
+  border: 1px solid #dbe2d8;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 34px minmax(0, 1fr);
+  min-height: 118px;
+  min-width: 130px;
+  padding: 12px;
+}
+
+/* 阶段序号：固定圆角方块 */
+.stage-card__index {
+  align-items: center;
+  border-radius: 6px;
+  display: flex;
+  font-weight: 800;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
+
+/* 阶段内容：标题、摘要和元信息纵向排列 */
+.stage-card__body {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* 阶段标题：保留清晰层级 */
+.stage-card__body strong {
+  font-size: 14px;
+}
+
+/* 阶段摘要：最多三行，防止流程轨道被长文本拖乱 */
+.stage-card__body span {
+  color: #2c3a31;
+  display: -webkit-box;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+/* 阶段元信息：弱化展示 */
+.stage-card__body small {
+  color: #66736b;
+  overflow-wrap: anywhere;
+}
+
+/* 已完成阶段：绿色表达成功推进 */
+.stage-done {
+  border-color: #9dceb0;
+  background: #eef8f1;
+}
+
+/* 已完成阶段序号：绿色底色 */
+.stage-done .stage-card__index {
+  background: #2f7d68;
+  color: #ffffff;
+}
+
+/* 当前阶段：蓝色表达正在处理 */
+.stage-active {
+  border-color: #8fb6d9;
+  background: #edf5fc;
+}
+
+/* 当前阶段序号：蓝色底色 */
+.stage-active .stage-card__index {
+  background: #3c6f9f;
+  color: #ffffff;
+}
+
+/* 等待阶段：灰色表达尚未开始 */
+.stage-waiting {
+  border-color: #d8ddd9;
+  background: #f7f8f7;
+}
+
+/* 等待阶段序号：浅灰底色 */
+.stage-waiting .stage-card__index,
+.stage-muted .stage-card__index {
+  background: #e3e7e4;
+  color: #68766d;
+}
+
+/* 可跳过阶段：弱化但保留链路位置 */
+.stage-muted {
+  border-color: #d8ddd9;
+  background: #fafafa;
+}
+
+/* 异常阶段：红色表达阻断 */
+.stage-error {
+  border-color: #e2a19a;
+  background: #fff0ee;
+}
+
+/* 异常阶段序号：红色底色 */
+.stage-error .stage-card__index {
+  background: #a33a32;
+  color: #ffffff;
+}
+
+/* 精简协作链：流程总览里只展示关键消息 */
+.compact-chain {
+  display: grid;
+  gap: 8px;
+}
+
+/* 精简消息卡：压缩字段，只保留类型、方向和正文 */
+.compact-message {
+  border: 1px solid;
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+}
+
+/* 精简消息方向：辅助文本弱化 */
+.compact-message span {
+  color: inherit;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+/* 精简消息正文：两行截断，避免第一屏过长 */
+.compact-message p {
+  display: -webkit-box;
+  line-height: 1.45;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 /* 双列布局：展示概览面板 */
 .two-column {
   display: grid;
@@ -788,12 +971,17 @@ code {
 /* 窄屏布局：工作区改为单列 */
 @media (max-width: 980px) {
   .workspace,
-  .two-column {
+  .two-column,
+  .process-layout {
     grid-template-columns: 1fr;
   }
 
   .ticket-list {
     max-height: none;
+  }
+
+  .stage-rail {
+    grid-template-columns: repeat(3, minmax(180px, 1fr));
   }
 }
 
@@ -821,5 +1009,9 @@ code {
 
   .message-card {
     grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .stage-rail {
+    grid-template-columns: 1fr;
   }
 }

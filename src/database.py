@@ -1,44 +1,87 @@
+# logger：项目统一日志记录器
 from logger import logger
-from sqlalchemy import create_engine, Column, String, Text, DateTime, JSON
+# SQLAlchemy 核心组件：用于定义列类型和表结构
+from sqlalchemy import Column, String, Text, DateTime, JSON
+# SQLAlchemy 异步组件：异步引擎、异步会话、异步会话工厂
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+# declarative_base：声明式基类，用于定义 ORM 模型
+from sqlalchemy.orm import declarative_base
+# SQLAlchemy 异常类
 from sqlalchemy.exc import SQLAlchemyError, OperationalError, IntegrityError
+# datetime：用于记录创建/更新时间
 from datetime import datetime
+# uuid：用于生成唯一 ID
 import uuid
-import os
+# settings：项目配置对象
 from config import settings
 
+# ═══════════════════════════════════════════════
+# 数据库引擎和会话配置
+# ═══════════════════════════════════════════════
+# engine：异步数据库引擎，使用 asyncpg 驱动连接 PostgreSQL
+# echo=settings.DB_ECHO：是否打印 SQL 语句（调试用）
 engine = create_async_engine(settings.get_database_url(), echo=settings.DB_ECHO)
+
+# AsyncSessionLocal：异步会话工厂，用于创建数据库会话
+# autocommit=False：不自动提交，需要手动 commit
+# autoflush=False：不自动刷新，避免意外查询
+# class_=AsyncSession：指定会话类为异步会话
 AsyncSessionLocal = async_sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=AsyncSession)
 
+# Base：声明式基类，所有 ORM 模型都继承自它
 Base = declarative_base()
 
+# ═══════════════════════════════════════════════
+# 工单状态枚举
+# ═══════════════════════════════════════════════
 class TicketStatus:
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    COMPLETED = "completed"
+    """工单状态常量类"""
+    PENDING = "pending"      # 待处理
+    APPROVED = "approved"    # 已审批
+    REJECTED = "rejected"    # 已拒绝
+    COMPLETED = "completed"  # 已完成
 
+# ═══════════════════════════════════════════════
+# ORM 模型定义
+# ═══════════════════════════════════════════════
 class Ticket(Base):
+    """工单表
+
+    存储工单的基本信息、诊断结果、修复计划、执行结果等。
+    是整个系统的核心数据表。
+    """
     __tablename__ = "tickets"
-    
+
+    # id：数据库主键，UUID 格式，自动生成
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # ticket_id：业务工单号，唯一，有索引（用于快速查询）
     ticket_id = Column(String(50), unique=True, nullable=False, index=True)
+    # symptom：故障现象描述，非空
     symptom = Column(Text, nullable=False)
+    # diagnosis_type：诊断类型（app/db/net/other）
     diagnosis_type = Column(String(20))
+    # urgency：紧急程度（low/medium/high/critical）
     urgency = Column(String(20))
+    # status：工单状态，默认 pending
     status = Column(String(20), default=TicketStatus.PENDING)
-    
+
+    # diagnosis_result：诊断结果（JSON 格式，存储各 Agent 的诊断结论）
     diagnosis_result = Column(JSON)
+    # fix_plan：修复计划（JSON 格式，存储修复步骤）
     fix_plan = Column(JSON)
+    # execution_result：执行结果（JSON 格式，存储执行器输出）
     execution_result = Column(JSON)
-    
+
+    # approval_status：审批状态
     approval_status = Column(String(20))
+    # approver_comments：审批人备注
     approver_comments = Column(Text)
-    
+
+    # messages：消息历史（JSON 格式，存储 Agent 间通信消息）
     messages = Column(JSON, default=list)
+    # created_at：创建时间，默认当前 UTC 时间
     created_at = Column(DateTime, default=datetime.utcnow)
+    # updated_at：更新时间，默认当前 UTC 时间，更新时自动刷新
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -50,24 +93,45 @@ class TicketAuditLog(Base):
     """
     __tablename__ = "ticket_audit_logs"
 
+    # id：数据库主键，UUID 格式
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # ticket_id：关联的工单号，有索引（用于按工单查询审计日志）
     ticket_id = Column(String(50), nullable=False, index=True)
+    # agent_name：执行操作的 Agent 名称，有索引（用于按 Agent 查询）
     agent_name = Column(String(50), nullable=False, index=True)
+    # action_type：操作类型（如 dispatch、diagnose、execute 等）
     action_type = Column(String(50), nullable=False)
+    # action_detail：操作详情（JSON 格式）
     action_detail = Column(JSON)
+    # input_context：输入上下文（JSON 格式，记录操作前的状态）
     input_context = Column(JSON)
+    # output_result：输出结果（JSON 格式，记录操作后的结果）
     output_result = Column(JSON)
+    # dispatch_round：调度轮次（用于多轮调度场景）
     dispatch_round = Column(String(10))
+    # created_at：操作时间，默认当前 UTC 时间，有索引（用于按时间排序）
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
+# ═══════════════════════════════════════════════
+# 数据库工具函数
+# ═══════════════════════════════════════════════
 async def init_db():
-    """初始化数据库表"""
+    """
+    初始化数据库表
+
+    根据 ORM 模型定义自动创建数据库表（如果表不存在）。
+    通常在应用启动时调用一次。
+    """
     try:
         logger.info("初始化数据库表")
+        # engine.begin()：开启一个事务块，自动提交/回滚
         async with engine.begin() as conn:
+            # run_sync：在异步上下文中运行同步函数
+            # Base.metadata.create_all：创建所有继承自 Base 的表
             await conn.run_sync(Base.metadata.create_all)
         logger.info('数据库初始化成功')
     except OperationalError as e:
+        # OperationalError：数据库连接失败（如网络不通、密码错误）
         logger.error(f"数据库连接失败: {e}")
         raise e
     except Exception as e:
@@ -75,28 +139,58 @@ async def init_db():
         raise e
 
 async def get_db():
+    """
+    获取数据库会话（异步生成器）
+
+    使用方式：
+        async for session in get_db():
+            # 使用 session 进行数据库操作
+            ...
+
+    特性：
+    - 自动管理会话生命周期（创建、回滚、关闭）
+    - 发生异常时自动回滚事务
+    """
     async with AsyncSessionLocal() as session:
         try:
             logger.debug("创建数据库会话")
             yield session
         except SQLAlchemyError as e:
+            # SQLAlchemyError：数据库操作异常，回滚事务
             logger.error(f"数据库会话异常: {e}")
             await session.rollback()
             raise e
         finally:
+            # finally：无论是否异常，都会关闭会话
             logger.debug("关闭数据库会话")
             await session.close()
 
 def serialize_value(value):
-    """序列化值，处理 Pydantic 模型和枚举"""
+    """
+    序列化值，处理 Pydantic 模型和枚举
+
+    用途：将 Pydantic 模型、枚举等不可 JSON 序列化的对象转为字典/字符串，
+          便于存入数据库 JSON 字段。
+
+    参数：
+        value: 任意值
+
+    返回：
+        可 JSON 序列化的值
+    """
+    # Pydantic v2 模型：使用 model_dump() 转为字典
     if hasattr(value, 'model_dump'):
         return value.model_dump()
+    # 枚举类型：取 value 属性
     elif hasattr(value, 'value'):
         return value.value
+    # 列表：递归序列化每个元素
     elif isinstance(value, list):
         return [serialize_value(v) for v in value]
+    # 字典：递归序列化每个值
     elif isinstance(value, dict):
         return {k: serialize_value(v) for k, v in value.items()}
+    # 其他类型：直接返回
     return value
 
 

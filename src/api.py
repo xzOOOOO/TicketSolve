@@ -1,54 +1,88 @@
+# FastAPI 核心组件：API 框架、异常、依赖注入、查询参数
 from fastapi import FastAPI, HTTPException, Depends, Query
+# CORS 中间件：处理跨域请求
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+# asynccontextmanager：异步上下文管理器，用于应用生命周期管理
 from contextlib import asynccontextmanager
+# ChatOpenAI：LangChain 的 OpenAI 兼容模型封装
 from langchain_openai import ChatOpenAI
+# Command：LangGraph 命令类型
 from langgraph.types import Command
-from database import init_db, get_db, AsyncSessionLocal
+# 数据库相关：初始化数据库和获取异步会话
+from database import init_db, get_db
+# create_async_workflow：创建工作流
 from workflow import create_async_workflow
+# 请求/响应模型
 from schemas import TicketCreateRequest, ApprovalRequest, TicketResponse, APIResponse
+# logger：项目统一日志记录器
 from logger import logger
-import asyncio
+# AsyncSession：SQLAlchemy 异步会话
 from sqlalchemy.ext.asyncio import AsyncSession
+# settings：项目配置对象
 from config import settings
+# LLM 限流器相关
 from llm_rate_limiter import LLMRateLimiter, RateLimitCallback
+
+# app_state：应用状态字典，存储 LLM、工作流、限流器等全局对象
+# 使用字典而非全局变量，便于测试时替换
 app_state = {}
 
+# ═══════════════════════════════════════════════
+# 应用生命周期管理
+# ═══════════════════════════════════════════════
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    FastAPI 应用生命周期管理
+
+    启动时：
+    1. 初始化数据库表
+    2. 创建 LLM 限流器
+    3. 创建 LLM 实例（集成限流回调）
+    4. 创建工作流（加载 MCP 工具）
+
+    关闭时：
+    - 记录关闭日志
+    """
     logger.info("=" * 50)
     logger.info("工单系统启动")
     logger.info("=" * 50)
-    
+
+    # 初始化数据库表（如果不存在则创建）
     await init_db()
     logger.info("数据库初始化完成")
-    
+
+    # 创建 LLM 限流器，控制并发数和 RPM
     rate_limiter = LLMRateLimiter(
         max_concurrent=settings.LLM_MAX_CONCURRENT,
         rpm_limit=settings.LLM_RPM_LIMIT
     )
     logger.info("LLM限流器初始化完成")
-    
+
+    # 创建 LLM 实例，传入限流回调
     llm_config = settings.get_llm_config()
     llm = ChatOpenAI(
         callbacks=[RateLimitCallback(rate_limiter)],
         **llm_config
     )
     logger.info("LLM实例创建完成（已集成限流回调）")
-    
+
+    # 创建工作流（内部会初始化 MCP Client 并加载工具）
     workflow_app = await create_async_workflow(llm, checkpointer=None)
     logger.info("异步工作流创建完成（MCP工具已加载）")
-    
+
+    # 将关键对象存入应用状态
     app_state["llm"] = llm
     app_state["workflow"] = workflow_app
     app_state["rate_limiter"] = rate_limiter
-    
+
     logger.info("工单系统准备就绪")
-    
-    yield
-    
+
+    yield  # 应用运行期间
+
     logger.info("工单系统关闭")
 
+# 创建 FastAPI 应用实例
 app = FastAPI(
     title="AI工单处理系统",
     description="基于LangGraph的智能工单处理系统",
@@ -73,23 +107,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ═══════════════════════════════════════════════
+# API 端点定义
+# ═══════════════════════════════════════════════
 @app.post("/api/tickets", response_model=APIResponse)
 async def create_ticket(request: TicketCreateRequest):
+    """
+    创建工单
+
+    接收故障描述，启动工作流进行处理。
+    工作流会经过诊断、修复计划生成、人工审批等步骤。
+    """
     try:
+        # 从应用状态获取工作流实例
         workflow = app_state["workflow"]
+        # config：工作流配置，thread_id 用于区分不同工单的状态
         config = {"configurable": {"thread_id": request.ticket_id}}
-        
+
+        # initial_state：工作流初始状态，至少包含 ticket_id 和 symptom
         initial_state = {
             "ticket_id": request.ticket_id,
             "symptom": request.symptom
         }
-        
+
         logger.info(f"收到工单创建请求: {request.ticket_id}")
-        
+
+        # 调用工作流，传入初始状态和配置
         result = await workflow.ainvoke(initial_state, config=config)
-        
+
         logger.info(f"工单 {request.ticket_id} 处理完成，等待审批")
-        
+
         return APIResponse(
             code=200,
             message="工单已提交，等待审批",

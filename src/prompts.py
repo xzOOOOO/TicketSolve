@@ -1,7 +1,35 @@
+# ============================================================
+# prompts.py：LLM Prompt 模板定义文件
+#
+# 作用：
+#   定义所有 Agent 与 LLM 交互时使用的提示词模板。
+#   使用 LangChain 的 ChatPromptTemplate，支持变量插值（如 {symptom}）。
+#
+# 核心概念：
+#   - ChatPromptTemplate：LangChain 提供的提示词模板类
+#   - from_messages([...])：用列表定义 system/human/ai 消息
+#   - {变量名}：占位符，运行时用实际值替换
+#
+# 为什么把 prompt 单独放一个文件？
+#   1. 集中管理，修改 prompt 不用翻业务代码
+#   2. 方便 A/B 测试不同 prompt 效果
+#   3. 多人协作时，非开发人员也能改 prompt
+# ============================================================
+
+# ChatPromptTemplate：LangChain 的聊天提示词模板
+# 支持多轮对话格式（system + human + ai + human...）
 from langchain_core.prompts import ChatPromptTemplate
 
 
+# ═══════════════════════════════════════════════════════════
+# 一、数据库诊断 Agent Prompt
+# ═══════════════════════════════════════════════════════════
+
+# DB_PROMPT：数据库诊断 Agent 的"工具调用阶段" prompt
+# 作用：告诉 LLM 它有哪些工具，要求它先调用工具收集信息，不能直接猜结论
+# 使用场景：DBAgent.react_loop() 的第一步，让 LLM 决定调用哪些诊断工具
 DB_PROMPT = ChatPromptTemplate.from_messages([
+    # system 消息：设定角色和可用工具
     ("system", """你是一位资深数据库工程师，擅长使用工具诊断数据库问题。
 
 你的工具：
@@ -10,9 +38,13 @@ DB_PROMPT = ChatPromptTemplate.from_messages([
 - check_db_deadlock: 检查死锁
 
 除非现象明确，否则你必须先调用工具收集信息，不能仅凭故障现象直接猜测结论。请根据故障现象，选择合适的工具进行分析。"""),
+    # human 消息：传入实际故障现象
     ("human", "故障现象：{symptom}")
 ])
 
+# DB_DIAGNOSIS_PROMPT：数据库诊断 Agent 的"结论生成阶段" prompt
+# 作用：在工具调用完成后，让 LLM 基于收集到的信息输出结构化诊断结论
+# 使用场景：DBAgent.react_loop() 的第二步，生成 DiagnosisOutput
 DB_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """你是一位资深数据库工程师。请基于收集到的信息给出诊断结论，输出 JSON 格式结果。
 
@@ -60,6 +92,14 @@ DB_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
   如果不需要协作，必须传空列表 []，不要省略此字段。"""),
 ])
 
+
+# ═══════════════════════════════════════════════════════════
+# 二、网络诊断 Agent Prompt
+# ═══════════════════════════════════════════════════════════
+
+# NET_PROMPT：网络诊断 Agent 的"工具调用阶段" prompt
+# 作用：告诉 LLM 它有哪些网络诊断工具，要求先调用工具
+# 使用场景：NetAgent.react_loop() 的第一步
 NET_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """你是一位资深网络架构师，擅长使用工具诊断网络问题。
 
@@ -72,6 +112,9 @@ NET_PROMPT = ChatPromptTemplate.from_messages([
     ("human", "故障现象：{symptom}")
 ])
 
+# NET_DIAGNOSIS_PROMPT：网络诊断 Agent 的"结论生成阶段" prompt
+# 作用：基于工具结果输出结构化诊断结论
+# 使用场景：NetAgent.react_loop() 的第二步
 NET_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """你是一位资深网络架构师。请基于收集到的信息给出诊断结论，输出 JSON 格式结果。
 
@@ -118,6 +161,14 @@ NET_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
   如果不需要协作，必须传空列表 []，不要省略此字段。"""),
 ])
 
+
+# ═══════════════════════════════════════════════════════════
+# 三、应用诊断 Agent Prompt
+# ═══════════════════════════════════════════════════════════
+
+# APP_PROMPT：应用诊断 Agent 的"工具调用阶段" prompt
+# 作用：告诉 LLM 它有哪些应用诊断工具，要求先调用工具
+# 使用场景：AppAgent.react_loop() 的第一步
 APP_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """你是一位资深应用架构师，擅长使用工具诊断应用问题。
 
@@ -131,6 +182,9 @@ APP_PROMPT = ChatPromptTemplate.from_messages([
     ("human", "故障现象：{symptom}")
 ])
 
+# APP_DIAGNOSIS_PROMPT：应用诊断 Agent 的"结论生成阶段" prompt
+# 作用：基于工具结果输出结构化诊断结论
+# 使用场景：AppAgent.react_loop() 的第二步
 APP_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """你是一位资深应用架构师。请基于收集到的信息给出诊断结论，输出 JSON 格式结果。
 
@@ -177,6 +231,15 @@ APP_DIAGNOSIS_PROMPT = ChatPromptTemplate.from_messages([
   如果不需要协作，必须传空列表 []，不要省略此字段。"""),
 ])
 
+
+# ═══════════════════════════════════════════════════════════
+# 四、修复方案生成 Agent Prompt
+# ═══════════════════════════════════════════════════════════
+
+# FIX_PROMPT：FixAgent 生成修复方案的 prompt
+# 作用：让 LLM 基于诊断结果生成结构化修复方案（FixPlanOutput）
+# 关键设计：强制使用 Action DSL，禁止生成自由文本命令（防注入）
+# 使用场景：FixAgent.run() 中调用
 FIX_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """你是一位资深自动化运维专家，擅长制定可执行的修复方案。请输出 JSON 格式的修复方案。
 
@@ -217,9 +280,19 @@ FIX_PROMPT = ChatPromptTemplate.from_messages([
 - steps: 修复步骤列表，每个步骤只使用平铺 Action DSL 字段，包含 step_id(步骤编号，必须是纯数字如 1/2/3，不要带前缀如 STEP-01)、action(动作描述)、action_type(结构化动作类型)、target(动作目标)、parameters(可选参数对象)、command(可选兼容展示命令)、risk_level(风险等级)、expected_output(预期输出)、on_failure(失败处理)、rollback_action_type(可选结构化回滚动作类型)、rollback_target(可选结构化回滚目标)、rollback_parameters(可选回滚参数对象)、rollback_command(可选兼容回滚命令)
 - verification: 验证方法，包含 commands(验证命令列表) 和 expected_result(预期结果)
 - estimated_time: 预计执行时间"""),
+    # human 消息：传入诊断结果和历史案例
     ("human", "诊断类型：{diagnosis_type}\n\n诊断结果：{diagnosis_result}\n\n历史相似案例：\n{case_context}\n\n请生成修复方案。")
 ])
 
+
+# ═══════════════════════════════════════════════════════════
+# 五、Supervisor 调度 Agent Prompt
+# ═══════════════════════════════════════════════════════════
+
+# SUPERVISOR_PROMPT：SupervisorAgent 的调度决策 prompt
+# 作用：分析故障现象，决定派发哪些诊断 Agent
+# 输出格式：SupervisorDecisionOutput（diagnosis_type/urgency/dispatch/reasoning）
+# 使用场景：workflow.py 的 supervisor 节点
 SUPERVISOR_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """你是一个智能工单调度主管（Supervisor）。你的职责是分析故障现象，决定派发哪些诊断Agent去调查。请输出 JSON 格式的调度决策。
 
@@ -253,6 +326,15 @@ SUPERVISOR_PROMPT = ChatPromptTemplate.from_messages([
     ("human", "故障现象：{symptom}")
 ])
 
+
+# ═══════════════════════════════════════════════════════════
+# 六、聚合诊断 Prompt
+# ═══════════════════════════════════════════════════════════
+
+# AGGREGATE_PROMPT：Aggregate 节点综合多个 Agent 诊断结果的 prompt
+# 作用：把多个 Agent 的诊断结论汇总成一个最终结论
+# 输出格式：AggregateOutput
+# 使用场景：workflow.py 的 aggregate 节点
 AGGREGATE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """你是一个智能诊断聚合器。你的职责是综合多个诊断Agent的结果，给出最终诊断结论。请输出 JSON 格式的聚合结果。
 
@@ -283,6 +365,15 @@ AGGREGATE_PROMPT = ChatPromptTemplate.from_messages([
     ("human", "故障现象：{symptom}\n\n各Agent诊断结果：\n{agent_results}")
 ])
 
+
+# ═══════════════════════════════════════════════════════════
+# 七、错误分析 Prompt（闭环执行器用）
+# ═══════════════════════════════════════════════════════════
+
+# ERROR_ANALYSIS_PROMPT：执行失败时，让 LLM 分析错误并决定下一步动作
+# 作用：根据真实的执行结果（exit_code/stdout/stderr）做决策
+# 输出格式：ErrorAnalysisOutput（action/adjusted_command/reasoning/estimated_fix_probability）
+# 使用场景：executor_v2.py 的闭环执行逻辑中
 ERROR_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """你是一个运维执行错误分析专家。你的职责是分析命令执行失败的原因，决定下一步动作。请输出 JSON 格式的决策结果。
 

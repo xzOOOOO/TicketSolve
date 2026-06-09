@@ -67,6 +67,19 @@ python eval/demo_trace.py --json-out eval/demo_trace_nginx_bad_route.json
 
 这条 trace 用来展示系统“不是缓存里有 Agent 结果就糊一个响应”，而是先做 evidence coverage 判定；旧证据不覆盖请求时，会定向重跑目标 Agent。
 
+## 项目质量检查
+
+提交简历或演示前建议先跑以下命令：
+
+```bash
+python -m pytest -q
+python -m compileall -q src tests eval
+cd frontend
+npm run build
+```
+
+当前已覆盖 Action DSL、Guardrail、Agent 协作协议、Trace 事件、案例库和 Replanner 等核心模块；完整链路演示需要额外准备 LLM API Key、PostgreSQL 和可选的 SREBench Lite Docker 靶场。
+
 ## 沙盒与安全边界
 
 本项目没有让 LLM 直接执行任意 shell。修复执行链路被限制在以下边界内：
@@ -889,13 +902,14 @@ Agent 通过 CommunicationBus 通信总线协作（证据协作协议 v1）：
 
 ## 开发计划
 
-- [ ] 实现真实诊断工具（SQL 查询、网络 ping 等）
+- [x] 添加核心单元测试与离线 demo trace
+- [x] 完成基础前端工作台
+- [ ] 扩展真实诊断工具（SQL 查询、网络 ping 等）
 - [ ] 添加 JWT 认证与角色权限
 - [ ] 集成 Prometheus 监控指标
-- [ ] 添加单元测试与集成测试
+- [ ] 补充 API 层集成测试
 - [ ] Docker 容器化部署
 - [ ] Webhook 通知（邮件/钉钉/企业微信）
-- [ ] 前端管理界面
 - [ ] 工单统计分析面板
 - [ ] MCP Server 支持 SSE 传输模式
 - [ ] Redis 分布式检查点替代 MemorySaver

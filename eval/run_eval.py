@@ -1,5 +1,6 @@
 import argparse
 import json
+import socket
 import subprocess
 import sys
 import time
@@ -89,7 +90,20 @@ def summarize_flow(api_base: str, ticket_id: str) -> dict:
         return {"diagnosis_type": None, "agents": [], "total_steps": 0, "error": str(exc)}
 
 
-def run_case(api_base: str, case: dict, approve: bool) -> dict:
+def _short_error(exc: Exception, limit: int = 240) -> str:
+    text = f"{type(exc).__name__}: {exc}"
+    return text[:limit]
+
+
+def run_case(
+    api_base: str,
+    case: dict,
+    approve: bool,
+    *,
+    create_timeout: int,
+    approve_timeout: int,
+    recovery_timeout: int,
+) -> dict:
     ticket_id = f"EVAL-{case['id']}-{int(time.time())}"
 
     run([sys.executable, str(CHAOS), "reset"])
@@ -97,46 +111,72 @@ def run_case(api_base: str, case: dict, approve: bool) -> dict:
     run([sys.executable, str(CHAOS), "inject", case["id"]])
     time.sleep(2)
 
-    create_result = http_json(
-        "POST",
-        f"{api_base}/api/tickets",
-        {"ticket_id": ticket_id, "symptom": case["ticket"]},
-        timeout=180,
-    )
-
-    approve_result = None
-    if approve:
-        approve_result = http_json(
+    try:
+        create_result = http_json(
             "POST",
-            f"{api_base}/api/tickets/{ticket_id}/approve",
-            {"approved": True, "comments": "eval auto-approval"},
-            timeout=180,
+            f"{api_base}/api/tickets",
+            {"ticket_id": ticket_id, "symptom": case["ticket"]},
+            timeout=create_timeout,
         )
 
-    fixed_by_agent, recovery_body = wait_for_recovery(case["recovery_check"])
-    flow = summarize_flow(api_base, ticket_id)
+        approve_result = None
+        if approve:
+            approve_result = http_json(
+                "POST",
+                f"{api_base}/api/tickets/{ticket_id}/approve",
+                {"approved": True, "comments": "eval auto-approval"},
+                timeout=approve_timeout,
+            )
 
-    # 评测记录完成后再做兜底清理，避免下一条 case 继承当前故障。
-    run([sys.executable, str(CHAOS), "recover", case["id"]], check=False)
+        fixed_by_agent, recovery_body = wait_for_recovery(case["recovery_check"], seconds=recovery_timeout)
+        flow = summarize_flow(api_base, ticket_id)
 
+        predicted = flow.get("diagnosis_type")
+        return {
+            "case": case["id"],
+            "expected": case["expected_domain"],
+            "predicted": predicted,
+            "matched": predicted == case["expected_domain"],
+            "fixed_by_agent": fixed_by_agent,
+            "agents": ",".join(flow.get("agents", [])),
+            "flow_steps": flow.get("total_steps", 0),
+            "ticket_id": ticket_id,
+            "create_message": create_result.get("message"),
+            "approved": approve_result is not None,
+            "recovery_probe": recovery_body,
+            "error": "",
+        }
+    except (TimeoutError, socket.timeout) as exc:
+        flow = summarize_flow(api_base, ticket_id)
+        return _failed_row(case, ticket_id, flow, f"HTTP timeout while processing case. {_short_error(exc)}")
+    except Exception as exc:
+        flow = summarize_flow(api_base, ticket_id)
+        return _failed_row(case, ticket_id, flow, _short_error(exc))
+    finally:
+        # 评测记录完成后再做兜底清理，避免下一条 case 继承当前故障。
+        run([sys.executable, str(CHAOS), "recover", case["id"]], check=False)
+
+
+def _failed_row(case: dict, ticket_id: str, flow: dict, error: str) -> dict:
     predicted = flow.get("diagnosis_type")
     return {
         "case": case["id"],
         "expected": case["expected_domain"],
         "predicted": predicted,
         "matched": predicted == case["expected_domain"],
-        "fixed_by_agent": fixed_by_agent,
+        "fixed_by_agent": False,
         "agents": ",".join(flow.get("agents", [])),
         "flow_steps": flow.get("total_steps", 0),
         "ticket_id": ticket_id,
-        "create_message": create_result.get("message"),
-        "approved": approve_result is not None,
-        "recovery_probe": recovery_body,
+        "create_message": "",
+        "approved": False,
+        "recovery_probe": "",
+        "error": error,
     }
 
 
 def print_table(rows: list[dict]) -> None:
-    columns = ["case", "expected", "predicted", "matched", "fixed_by_agent", "agents", "flow_steps"]
+    columns = ["case", "expected", "predicted", "matched", "fixed_by_agent", "agents", "flow_steps", "error"]
     widths = {
         col: max(len(col), *(len(str(row.get(col, ""))) for row in rows))
         for col in columns
@@ -153,6 +193,9 @@ def main() -> None:
     parser.add_argument("--cases", nargs="*", help="Case IDs to run")
     parser.add_argument("--no-approve", action="store_true", help="Do not resume approval/execution")
     parser.add_argument("--json-out", type=Path, help="Optional JSON report path")
+    parser.add_argument("--create-timeout", type=int, default=600, help="Seconds to wait for POST /tickets")
+    parser.add_argument("--approve-timeout", type=int, default=600, help="Seconds to wait for POST /approve")
+    parser.add_argument("--recovery-timeout", type=int, default=45, help="Seconds to wait for recovery probe")
     args = parser.parse_args()
 
     cases = load_cases(args.cases)
@@ -162,7 +205,14 @@ def main() -> None:
     rows = []
     for case in cases:
         print(f"\n=== {case['id']} ===")
-        rows.append(run_case(args.api_base.rstrip("/"), case, approve=not args.no_approve))
+        rows.append(run_case(
+            args.api_base.rstrip("/"),
+            case,
+            approve=not args.no_approve,
+            create_timeout=args.create_timeout,
+            approve_timeout=args.approve_timeout,
+            recovery_timeout=args.recovery_timeout,
+        ))
 
     print("\nResults")
     print_table(rows)

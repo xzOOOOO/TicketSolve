@@ -262,5 +262,101 @@
     "source_ticket_id": "TKT-013",
     "created_at": "2026-06-06T11:49:15.382499+00:00",
     "updated_at": "2026-06-06T11:49:15.383004+00:00"
+  },
+  {
+    "case_id": "ticket:TKT-014",
+    "title": "Resolved ticket TKT-014",
+    "symptoms": [
+      "APP打不开了"
+    ],
+    "tool_evidence": [
+      "check_db_connection: [{'type': 'text', 'text': '{\"tool\": \"check_db_connection\", \"status\": \"ok\", \"container\": {\"container\": \"srebench-postgres\", \"exists\": true, \"status\": \"running\", \"running\": true, \"exit_code\": 0, \"error\": \"\"}, \"tcp_probe\": {\"target\": \"localhost:15432\", \"status\": \"reachable\", \"latency_ms\": 30}, \"query_result\": [[1]], \"evidence\": [\"postgres container, port and query are healthy\"], \"suggested_domain\": \"db_agent\", \"timestamp\": 1781015955.847}', 'id': 'lc_1158eb64-3c11-40db-80f4-b7f5a2d815a6'}]",
+      "check_db_slow_query: [{'type': 'text', 'text': '{\"tool\": \"check_db_slow_query\", \"status\": \"slow_or_failed\", \"index_exists\": true, \"http_probe\": {\"url\": \"http://localhost:18080/orders/pending\", \"status\": \"failed\", \"http_status\": 502, \"elapsed_ms\": 3081, \"error\": \"Bad Gateway\"}, \"evidence\": [\"pending-orders endpoint failed: Bad Gateway\", \"pending-orders endpoint is slow: 3081ms\"], \"recommendation\": \"no index action required\", \"suggested_domain\": \"db_agent\", \"timestamp\": 1781015961.459}', 'id': 'lc_dca353c5-487e-4804-8",
+      "check_db_deadlock: [{'type': 'text', 'text': '{\"tool\": \"check_db_deadlock\", \"status\": \"ok\", \"lock_waits\": [], \"evidence\": [\"no lock waits detected\"], \"error\": null, \"suggested_domain\": \"db_agent\", \"timestamp\": 1781015962.492}', 'id': 'lc_3ccea70e-0c88-4d8e-bd21-afd5cf5e7313'}]",
+      "check_app_health: [{'type': 'text', 'text': '{\"tool\": \"check_app_health\", \"status\": \"failed\", \"container\": {\"container\": \"srebench-app\", \"exists\": true, \"status\": \"exited\", \"running\": false, \"exit_code\": 0, \"error\": \"\"}, \"http_probe\": {\"url\": \"http://localhost:18081/health\", \"status\": \"failed\", \"elapsed_ms\": 4108, \"error\": \"[WinError 10061] 由于目标计算机积极拒绝，无法连接。\"}, \"evidence\": [\"app health failed: [WinError 10061] 由于目标计算机积极拒绝，无法连接。\"], \"suggested_domain\": \"app_agent\", \"timestamp\": 1781015957.232}', 'id': 'lc_aa166ca9-",
+      "check_app_redis_connection: [{'type': 'text', 'text': '{\"tool\": \"check_app_redis_connection\", \"status\": \"failed\", \"container\": {\"container\": \"srebench-redis\", \"exists\": true, \"status\": \"running\", \"running\": true, \"exit_code\": 0, \"error\": \"\"}, \"tcp_probe\": {\"target\": \"localhost:16379\", \"status\": \"reachable\", \"latency_ms\": 5}, \"cache_endpoint_probe\": {\"url\": \"http://localhost:18080/cache/ping\", \"status\": \"failed\", \"http_status\": 502, \"elapsed_ms\": 2402, \"error\": \"Bad Gateway\"}, \"evidence\": [\"cache endpoint failed: Bad Gatewa",
+      "check_app_port: [{'type': 'text', 'text': '{\"tool\": \"check_app_port\", \"port\": 18081, \"target\": \"localhost:18081\", \"status\": \"unreachable\", \"latency_ms\": null, \"error\": \"[WinError 10061] 由于目标计算机积极拒绝，无法连接。\", \"suggested_domain\": \"app_agent\", \"timestamp\": 1781015966.441}', 'id': 'lc_0618894b-29a0-4086-bf4f-0148d225f0d7'}]",
+      "check_app_process: [{'type': 'text', 'text': '{\"tool\": \"check_app_process\", \"process\": \"app\", \"status\": \"stopped\", \"container\": {\"container\": \"srebench-app\", \"exists\": true, \"status\": \"exited\", \"running\": false, \"exit_code\": 0, \"error\": \"\"}, \"recent_logs\": \"INFO:     Started server process [1]\\\\nINFO:     Waiting for application startup.\\\\nINFO:     Application startup complete.\\\\nINFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)\\\\nINFO:     Shutting down\\\\nINFO:     Waiting for application s"
+    ],
+    "root_cause": "应用容器（srebench-app）在启动后立即异常退出（exit_code 0），导致服务进程不可用且端口拒绝连接，反向代理因上游服务不可达返回 502 Bad Gateway，最终致使 APP 无法打开。",
+    "possible_causes": [
+      "应用启动命令（CMD/ENTRYPOINT）未保持前台运行或配置错误，导致进程初始化完成后直接退出",
+      "应用启动时遇到配置校验失败、依赖项缺失或权限问题，触发了安全退出机制",
+      "端口映射或监听地址配置不一致，导致服务无法正常拉起"
+    ],
+    "successful_repair_action": {
+      "step_id": 1,
+      "action": "执行应用进程故障恢复，重新启动 srebench-app 并修复启动配置",
+      "action_type": "RECOVER_FAULT",
+      "target": "APP_PROCESS_DOWN",
+      "command": "python lab/chaos.py recover APP_PROCESS_DOWN"
+    },
+    "successful_repair_actions": [
+      {
+        "step_id": 1,
+        "action": "执行应用进程故障恢复，重新启动 srebench-app 并修复启动配置",
+        "action_type": "RECOVER_FAULT",
+        "target": "APP_PROCESS_DOWN",
+        "command": "python lab/chaos.py recover APP_PROCESS_DOWN"
+      },
+      {
+        "step_id": 2,
+        "action": "直连验证应用服务健康状态",
+        "action_type": "HTTP_PROBE",
+        "target": "http://localhost:18081/health",
+        "command": "curl http://localhost:18081/health"
+      },
+      {
+        "step_id": 3,
+        "action": "通过反向代理验证核心业务接口可用性",
+        "action_type": "HTTP_PROBE",
+        "target": "http://localhost:18080/orders/pending",
+        "command": "curl http://localhost:18080/orders/pending"
+      }
+    ],
+    "verification": {
+      "commands": [
+        "http://localhost:18080/health",
+        "http://localhost:18080/cache/ping",
+        "http://localhost:18080/orders/pending"
+      ],
+      "expected_result": "所有恢复探针 HTTP 2xx",
+      "probe_result": {
+        "verified": true,
+        "verification_probe": [
+          {
+            "name": "health",
+            "url": "http://localhost:18080/health",
+            "status_code": 200,
+            "success": true,
+            "body": "{\"status\":\"ok\",\"checks\":{\"db\":\"ok\",\"redis\":\"ok\"}}",
+            "error": "",
+            "checked_at": "2026-06-09T14:45:15.834396+00:00"
+          },
+          {
+            "name": "cache_ping",
+            "url": "http://localhost:18080/cache/ping",
+            "status_code": 200,
+            "success": true,
+            "body": "{\"status\":\"ok\",\"value\":\"1781016315.842463\"}",
+            "error": "",
+            "checked_at": "2026-06-09T14:45:15.835741+00:00"
+          },
+          {
+            "name": "orders_pending",
+            "url": "http://localhost:18080/orders/pending",
+            "status_code": 200,
+            "success": true,
+            "body": "{\"count\":50,\"elapsed_ms\":8,\"items\":[{\"id\":5,\"status\":\"pending\",\"amount\":475.72},{\"id\":10,\"status\":\"pending\",\"amount\":467.39},{\"id\":15,\"status\":\"pending\",\"amount\":290.74},{\"id\":20,\"status\":\"pending\",\"amount\":175.51},{\"id\":25,\"status\":\"pending\",\"amount\":117.96},{\"id\":30,\"status\":\"pending\",\"amount\":340.28},{\"id\":35,\"status\":\"pending\",\"amount\":135.63},{\"id\":40,\"status\":\"pending\",\"amount\":343.21},{\"id\":45,\"status\":\"pending\",\"amount\":421.2},{\"id\":50,\"status\":\"pending\",\"amount\":75.84},{\"id\":55,\"status\":\"pending\",\"amount\":182.29},{\"id\":60,\"status\":\"pending\",\"amount\":384.5},{\"id\":65,\"status\":\"pending\",\"amount\":387.18},{\"id\":70,\"status\":\"pending\",\"amount\":207.94},{\"id\":75,\"status\":\"pending\",\"amount\":1.89},{\"id\":80,\"status\":\"pending\",\"amount\":234.74},{\"id\":85,\"status\":\"pending\",\"amount\":296.4},{\"id\":90,\"status\":\"pending\",\"amount\":263.36},{\"id\":95,\"status\":\"pending\",\"amount\":194.84},{\"id\":100,\"status\":\"pending\",\"amount\":482.93},{\"id\":105,\"status\":\"pending\",\"amount\":18.69},{\"id\":110,\"status\":\"pendi",
+            "error": "",
+            "checked_at": "2026-06-09T14:45:15.836247+00:00"
+          }
+        ],
+        "recovered_at": "2026-06-09T14:45:15.874003+00:00"
+      }
+    },
+    "source_ticket_id": "TKT-014",
+    "created_at": "2026-06-09T14:45:15.876541+00:00",
+    "updated_at": "2026-06-09T14:45:15.876541+00:00"
   }
 ]

@@ -122,6 +122,122 @@
             </button>
           </nav>
 
+          <section v-if="activeTab === 'process'" class="tab-panel">
+            <div class="process-layout">
+              <article class="panel process-hero">
+                <div class="panel__header">
+                  <h3>当前进展</h3>
+                  <span class="status-pill" :class="currentPhase.className">{{ currentPhase.label }}</span>
+                </div>
+                <p class="process-hero__diagnosis">{{ primaryDiagnosisText }}</p>
+                <dl class="field-grid field-grid--compact">
+                  <div>
+                    <dt>故障类型</dt>
+                    <dd>{{ primaryFaultType }}</dd>
+                  </div>
+                  <div>
+                    <dt>置信度</dt>
+                    <dd>{{ primaryConfidence }}</dd>
+                  </div>
+                  <div>
+                    <dt>下一步</dt>
+                    <dd>{{ nextActionText }}</dd>
+                  </div>
+                </dl>
+              </article>
+
+              <article class="panel process-action">
+                <div class="panel__header">
+                  <h3>处理动作</h3>
+                  <span>{{ approvalLabel(selectedTicket.approval_status) }}</span>
+                </div>
+                <template v-if="canApproveSelectedTicket">
+                  <form class="approval-form approval-form--stacked" @submit.prevent="approveSelectedTicket">
+                    <select v-model="approvalForm.approved">
+                      <option :value="true">批准</option>
+                      <option :value="false">拒绝</option>
+                    </select>
+                    <input v-model.trim="approvalForm.comments" type="text" placeholder="审批意见" />
+                    <button class="primary-button" type="submit" :disabled="loading.approval">
+                      {{ loading.approval ? '处理中' : '提交审批' }}
+                    </button>
+                  </form>
+                  <p v-if="errors.approval" class="error-text">{{ errors.approval }}</p>
+                </template>
+                <p v-else class="empty-text">{{ actionPanelText }}</p>
+              </article>
+            </div>
+
+            <article class="panel">
+              <div class="panel__header">
+                <h3>主流程</h3>
+                <span>{{ completedStageCount }}/{{ processStages.length }}</span>
+              </div>
+              <div class="stage-rail">
+                <div
+                  v-for="stage in processStages"
+                  :key="stage.key"
+                  class="stage-card"
+                  :class="stage.className"
+                >
+                  <div class="stage-card__index">{{ stage.index }}</div>
+                  <div class="stage-card__body">
+                    <strong>{{ stage.title }}</strong>
+                    <span>{{ stage.summary }}</span>
+                    <small>{{ stage.meta }}</small>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <div class="process-layout">
+              <article class="panel">
+                <div class="panel__header">
+                  <h3>关键协作</h3>
+                  <span>{{ communicationChains.length }}</span>
+                </div>
+                <div v-if="primaryCommunicationChain" class="compact-chain">
+                  <div
+                    v-for="message in primaryCommunicationChain.messages"
+                    :key="message._key"
+                    class="compact-message"
+                    :class="messageTypeClass(message.msg_type)"
+                  >
+                    <strong>{{ messageTypeLabel(message.msg_type) }}</strong>
+                    <span>{{ message.sender || 'unknown' }} -> {{ message.receiver || 'broadcast' }}</span>
+                    <p>{{ message.content || message.hypothesis || '无消息内容' }}</p>
+                  </div>
+                </div>
+                <p v-else class="empty-text">暂无协作链路</p>
+              </article>
+
+              <article class="panel">
+                <div class="panel__header">
+                  <h3>修复摘要</h3>
+                  <span>{{ fixSteps.length }} 步</span>
+                </div>
+                <dl class="field-grid">
+                  <div>
+                    <dt>方案</dt>
+                    <dd>{{ fixPlan.description || fixPlan.plan_id || '暂无方案' }}</dd>
+                  </div>
+                  <div>
+                    <dt>风险</dt>
+                    <dd>{{ fixPlan.risk_level || '未知' }}</dd>
+                  </div>
+                  <div>
+                    <dt>预计耗时</dt>
+                    <dd>{{ fixPlan.estimated_time || '未知' }}</dd>
+                  </div>
+                  <div>
+                    <dt>验证</dt>
+                    <dd>{{ verificationSummary }}</dd>
+                  </div>
+                </dl>
+              </article>
+            </div>
+          </section>
+
           <section v-if="activeTab === 'overview'" class="tab-panel">
             <div class="two-column">
               <article class="panel">
@@ -195,12 +311,6 @@
               </div>
             </article>
 
-            <article class="panel">
-              <div class="panel__header">
-                <h3>诊断原始结构</h3>
-              </div>
-              <JsonTree :value="selectedTicket.diagnosis_result || {}" label="diagnosis_result" />
-            </article>
           </section>
 
           <section v-if="activeTab === 'collaboration'" class="tab-panel">
@@ -491,10 +601,11 @@ const statusOptions = [
 ]
 // detailTabs：详情区域页签
 const detailTabs = [
-  { value: 'overview', label: '总览' },
-  { value: 'collaboration', label: '协作链路' },
-  { value: 'fix', label: '修复' },
-  { value: 'flow', label: 'Agent 流程' },
+  { value: 'process', label: '流程总览' },
+  { value: 'overview', label: '诊断证据' },
+  { value: 'collaboration', label: '协作链' },
+  { value: 'fix', label: '修复审批' },
+  { value: 'flow', label: '审计流程' },
   { value: 'trace', label: 'Trace' },
   { value: 'raw', label: '原始 JSON' },
 ]
@@ -563,7 +674,7 @@ const health = ref(null)
 // rateStats：限流器统计信息
 const rateStats = ref(null)
 // activeTab：详情区域当前页签
-const activeTab = ref('overview')
+const activeTab = ref('process')
 // loading：页面各异步动作的加载状态
 const loading = reactive({
   tickets: false,
@@ -721,6 +832,120 @@ const diagnosisFields = computed(() => {
     { key: 'hypothesis', label: '假设', value: diagnosis.hypothesis || '无' },
     { key: 'possible_causes', label: '可能原因', value: listText(diagnosis.possible_causes) },
   ]
+})
+// canApproveSelectedTicket：当前工单是否可以直接审批
+const canApproveSelectedTicket = computed(() => {
+  // approvalStatus：后端保存的审批状态
+  const approvalStatus = selectedTicket.value?.approval_status
+  // ticketStatus：后端保存的工单状态
+  const ticketStatus = selectedTicket.value?.status
+  return Boolean(fixSteps.value.length > 0 && approvalStatus === 'pending' && ['pending', 'pending_approval'].includes(ticketStatus))
+})
+// primaryDiagnosisText：流程总览里展示的主诊断结论
+const primaryDiagnosisText = computed(() => {
+  // diagnosis：当前诊断结果对象
+  const diagnosis = selectedTicket.value?.diagnosis_result || {}
+  return diagnosis.diagnosis || diagnosis.reasoning || '诊断尚未生成'
+})
+// primaryFaultType：流程总览里展示的故障类型
+const primaryFaultType = computed(() => {
+  // diagnosis：当前诊断结果对象
+  const diagnosis = selectedTicket.value?.diagnosis_result || {}
+  return diagnosis.fault_type || selectedTicket.value?.diagnosis_type || '未知'
+})
+// primaryConfidence：流程总览里展示的置信度
+const primaryConfidence = computed(() => {
+  // diagnosis：当前诊断结果对象
+  const diagnosis = selectedTicket.value?.diagnosis_result || {}
+  return confidenceText(diagnosis.confidence)
+})
+// verificationSummary：恢复验证摘要
+const verificationSummary = computed(() => {
+  // executionResult：当前工单执行结果
+  const executionResult = selectedTicket.value?.execution_result || {}
+  // probes：恢复验证探针列表
+  const probes = executionResult.probes || executionResult.verification_probes || []
+  // verified：恢复验证是否通过
+  const verified = executionResult.verified
+  if (typeof verified === 'boolean') {
+    return verified ? '验证通过' : '验证未通过'
+  }
+  if (Array.isArray(probes) && probes.length > 0) {
+    return `${probes.filter((probe) => probe.success).length}/${probes.length} 个探针通过`
+  }
+  return '暂无验证'
+})
+// currentPhase：当前工单所在主阶段
+const currentPhase = computed(() => {
+  // ticketStatus：工单状态
+  const ticketStatus = selectedTicket.value?.status
+  // approvalStatus：审批状态
+  const approvalStatus = selectedTicket.value?.approval_status
+  if (ticketStatus === 'completed') {
+    return { label: '已完成', className: 'status-ok' }
+  }
+  if (ticketStatus === 'rejected' || approvalStatus === 'rejected') {
+    return { label: '已拒绝', className: 'status-failed' }
+  }
+  if (canApproveSelectedTicket.value) {
+    return { label: '待审批', className: 'status-pending' }
+  }
+  if (ticketStatus === 'approved' || approvalStatus === 'approved') {
+    return { label: '执行中', className: 'status-pending' }
+  }
+  if (fixSteps.value.length > 0) {
+    return { label: '方案已生成', className: 'status-pending' }
+  }
+  if (selectedTicket.value?.diagnosis_result) {
+    return { label: '已诊断', className: 'status-ok' }
+  }
+  return { label: '已提交', className: 'status-muted' }
+})
+// nextActionText：当前工单下一步动作说明
+const nextActionText = computed(() => {
+  // ticketStatus：工单状态
+  const ticketStatus = selectedTicket.value?.status
+  // approvalStatus：审批状态
+  const approvalStatus = selectedTicket.value?.approval_status
+  if (canApproveSelectedTicket.value) {
+    return '审批修复方案'
+  }
+  if (ticketStatus === 'completed') {
+    return '查看执行与验证结果'
+  }
+  if (ticketStatus === 'rejected' || approvalStatus === 'rejected') {
+    return '查看拒绝原因'
+  }
+  if (ticketStatus === 'approved' || approvalStatus === 'approved') {
+    return '等待执行和验证'
+  }
+  if (!fixSteps.value.length) {
+    return '等待修复方案'
+  }
+  return '查看详情'
+})
+// actionPanelText：不可审批时动作面板展示文本
+const actionPanelText = computed(() => {
+  // ticketStatus：工单状态
+  const ticketStatus = selectedTicket.value?.status
+  if (ticketStatus === 'completed') {
+    return '工单已完成，可查看执行与验证详情。'
+  }
+  if (ticketStatus === 'rejected') {
+    return selectedTicket.value?.approver_comments || '工单已被拒绝。'
+  }
+  if (selectedTicket.value?.approval_status === 'approved') {
+    return '方案已批准，等待执行链路更新。'
+  }
+  return '当前阶段暂不需要人工动作。'
+})
+// primaryCommunicationChain：流程总览里展示的第一条关键协作链
+const primaryCommunicationChain = computed(() => communicationChains.value[0] || null)
+// processStages：主流程阶段列表
+const processStages = computed(() => buildProcessStages())
+// completedStageCount：已经完成的阶段数量
+const completedStageCount = computed(() => {
+  return processStages.value.filter((stage) => stage.className === 'stage-done').length
 })
 // healthText：健康检查展示文本
 const healthText = computed(() => health.value?.status === 'ok' ? '后端正常' : '后端未连接')
@@ -943,7 +1168,7 @@ async function loadTickets() {
  */
 async function selectTicket(ticketId) {
   selectedTicketId.value = ticketId
-  activeTab.value = 'overview'
+  activeTab.value = 'process'
   await Promise.all([loadTicketDetail(ticketId), loadAgentFlow(ticketId)])
 }
 
@@ -1060,6 +1285,88 @@ async function approveSelectedTicket() {
   } finally {
     loading.approval = false
   }
+}
+
+/**
+ * 构建主流程阶段列表。
+ *
+ * 参数说明：
+ * - 无
+ *
+ * 返回值说明：
+ * - 主流程阶段数组
+ *
+ * 异常说明：
+ * - 无
+ */
+function buildProcessStages() {
+  // ticketStatus：工单状态
+  const ticketStatus = selectedTicket.value?.status
+  // approvalStatus：审批状态
+  const approvalStatus = selectedTicket.value?.approval_status
+  // hasDiagnosis：是否已有诊断结果
+  const hasDiagnosis = Boolean(selectedTicket.value?.diagnosis_result)
+  // hasCollaboration：是否已有 Agent 协作消息
+  const hasCollaboration = communicationMessages.value.length > 0
+  // hasFixPlan：是否已有修复步骤
+  const hasFixPlan = fixSteps.value.length > 0
+  // isRejected：是否已拒绝
+  const isRejected = ticketStatus === 'rejected' || approvalStatus === 'rejected'
+  // isApproved：是否已批准
+  const isApproved = ticketStatus === 'approved' || approvalStatus === 'approved' || ticketStatus === 'completed'
+  // isCompleted：是否已完成
+  const isCompleted = ticketStatus === 'completed'
+
+  return [
+    {
+      key: 'submitted',
+      index: 1,
+      title: '接收工单',
+      summary: selectedTicket.value?.ticket_id || '暂无工单',
+      meta: formatDate(selectedTicket.value?.created_at),
+      className: 'stage-done',
+    },
+    {
+      key: 'diagnosis',
+      index: 2,
+      title: 'Agent 诊断',
+      summary: hasDiagnosis ? primaryDiagnosisText.value : '等待 Agent 输出诊断',
+      meta: `${diagnosisTypeLabel(selectedTicket.value?.diagnosis_type)} / ${urgencyLabel(selectedTicket.value?.urgency)}`,
+      className: hasDiagnosis ? 'stage-done' : 'stage-active',
+    },
+    {
+      key: 'collaboration',
+      index: 3,
+      title: '证据协作',
+      summary: hasCollaboration ? `${communicationMessages.value.length} 条通信消息` : '无跨 Agent 证据请求',
+      meta: hasCollaboration ? `${communicationChains.value.length} 条链路` : '按需触发',
+      className: hasCollaboration ? 'stage-done' : hasDiagnosis ? 'stage-muted' : 'stage-waiting',
+    },
+    {
+      key: 'fix',
+      index: 4,
+      title: '生成方案',
+      summary: hasFixPlan ? (fixPlan.value.description || `${fixSteps.value.length} 个步骤`) : '等待修复方案',
+      meta: hasFixPlan ? `风险：${fixPlan.value.risk_level || '未知'}` : 'Fix Agent',
+      className: hasFixPlan ? 'stage-done' : hasDiagnosis ? 'stage-active' : 'stage-waiting',
+    },
+    {
+      key: 'approval',
+      index: 5,
+      title: '人工审批',
+      summary: approvalLabel(approvalStatus),
+      meta: selectedTicket.value?.approver_comments || '安全门禁',
+      className: isRejected ? 'stage-error' : isApproved ? 'stage-done' : canApproveSelectedTicket.value ? 'stage-active' : 'stage-waiting',
+    },
+    {
+      key: 'execution',
+      index: 6,
+      title: '执行验证',
+      summary: verificationSummary.value,
+      meta: selectedTicket.value?.updated_at ? formatDate(selectedTicket.value.updated_at) : '等待执行器',
+      className: isCompleted ? 'stage-done' : isApproved ? 'stage-active' : isRejected ? 'stage-muted' : 'stage-waiting',
+    },
+  ]
 }
 
 /**
